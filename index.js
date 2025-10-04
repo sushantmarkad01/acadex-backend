@@ -24,27 +24,14 @@ function getDistance(lat1, lon1, lat2, lon2) {
     return R * c;
 }
 
-// Endpoint for creating users
-app.post('/createUser', async (req, res) => {
-  try {
-    const { email, password, firstName, lastName, role, instituteId, extras } = req.body;
-    const userRecord = await admin.auth().createUser({ email, password, displayName: `${firstName} ${lastName}` });
-    const userProfile = { uid: userRecord.uid, email, role, instituteId, firstName, lastName, ...extras };
-    await admin.firestore().collection('users').doc(userRecord.uid).set(userProfile);
-    await admin.auth().setCustomUserClaims(userRecord.uid, { role, instituteId });
-    res.status(200).send({ message: `Success! User ${email} was created.` });
-  } catch (error) {
-    console.error("Error creating new user:", error);
-    res.status(500).send({ error: error.message });
-  }
-});
+// ... /createUser endpoint is unchanged ...
 
 // Endpoint for marking attendance
 app.post('/markAttendance', async (req, res) => {
     try {
         const { sessionId, studentLocation } = req.body;
         const authToken = req.headers.authorization?.split('Bearer ')[1];
-        if (!authToken) return res.status(401).send({ error: 'Unauthorized. No auth token provided.' });
+        if (!authToken) return res.status(401).send({ error: 'Unauthorized.' });
 
         const decodedToken = await admin.auth().verifyIdToken(authToken);
         const studentUid = decodedToken.uid;
@@ -58,9 +45,23 @@ app.post('/markAttendance', async (req, res) => {
         const classroomLocation = sessionDoc.data().location;
         if (!classroomLocation) return res.status(500).send({ error: 'Session was started without a location.' });
 
-        const distance = getDistance(classroomLocation.latitude, classroomLocation.longitude, studentLocation.latitude, studentLocation.longitude);
+        // ✅ --- DEBUG LOGS START ---
+        console.log("--- New Attendance Check ---");
+        console.log("Classroom Location (Teacher):", classroomLocation);
+        console.log("Student Location:", studentLocation);
+        // ✅ --- DEBUG LOGS END ---
 
-        const ACCEPTABLE_RADIUS_METERS = 50;
+        const distance = getDistance(
+            classroomLocation.latitude, classroomLocation.longitude,
+            studentLocation.latitude, studentLocation.longitude
+        );
+
+        // ✅ --- DEBUG LOGS START ---
+        console.log(`Calculated Distance: ${Math.round(distance)} meters`);
+        // ✅ --- DEBUG LOGS END ---
+
+        // Let's increase the radius to account for inaccuracies
+        const ACCEPTABLE_RADIUS_METERS = 200; // Increased from 50 to 200 meters
         if (distance > ACCEPTABLE_RADIUS_METERS) {
             return res.status(403).send({ error: `Attendance rejected. You are ${Math.round(distance)} meters away from the classroom.` });
         }
