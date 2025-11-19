@@ -6,188 +6,167 @@ const app = express();
 app.use(cors({ origin: true }));
 app.use(express.json());
 
-// ---------- Firebase Admin init (from env var) ----------
+// Initialize Firebase Admin
 function initFirebaseAdmin() {
-  // Try env var first
-  const svcEnv = process.env.FIREBASE_SERVICE_ACCOUNT; // expected base64 or JSON string
-  if (svcEnv) {
-    let svcJson;
-    try {
-      // If it's base64 encoded, decode
-      if (/^[A-Za-z0-9+/=]+\s*$/.test(svcEnv) && svcEnv.length > 1000) {
-        const decoded = Buffer.from(svcEnv, 'base64').toString('utf8');
-        svcJson = JSON.parse(decoded);
-      } else {
-        svcJson = JSON.parse(svcEnv);
-      }
-    } catch (err) {
-      console.error("Failed to parse FIREBASE_SERVICE_ACCOUNT env var:", err);
-      process.exit(1);
-    }
-    admin.initializeApp({
-      credential: admin.credential.cert(svcJson),
-    });
-    console.log("Firebase Admin initialized from FIREBASE_SERVICE_ACCOUNT env var.");
-    return;
-  }
-
-  // Local fallback (only for dev) — WARNING: do not use in production
-  try {
-    // eslint-disable-next-line global-require
-    const local = require('./serviceAccountKey.json');
-    admin.initializeApp({
-      credential: admin.credential.cert(local),
-    });
-    console.log("Firebase Admin initialized from local serviceAccountKey.json (dev only).");
-    return;
-  } catch (err) {
-    console.error("No Firebase service account configured. Set FIREBASE_SERVICE_ACCOUNT env var.");
-    process.exit(1);
-  }
+  const svcEnv = process.env.FIREBASE_SERVICE_ACCOUNT;
+  if (svcEnv) {
+    try {
+      const svcJson = (/^[A-Za-z0-9+/=]+\s*$/.test(svcEnv) && svcEnv.length > 1000)
+        ? JSON.parse(Buffer.from(svcEnv, 'base64').toString('utf8'))
+        : JSON.parse(svcEnv);
+      admin.initializeApp({ credential: admin.credential.cert(svcJson) });
+      console.log("Firebase Admin initialized from env var.");
+      return;
+    } catch (err) {
+      console.error("Failed to parse env var:", err);
+      process.exit(1);
+    }
+  }
+  try {
+    const local = require('./serviceAccountKey.json');
+    admin.initializeApp({ credential: admin.credential.cert(local) });
+    console.log("Firebase Admin initialized from local file.");
+  } catch (err) {
+    console.error("No service account configured.");
+    process.exit(1);
+  }
 }
 initFirebaseAdmin();
 
-// ---------- Utility: haversine distance (meters) ----------
+// Utility: Haversine Distance
 function getDistance(lat1, lon1, lat2, lon2) {
-  const toRad = (x) => (x * Math.PI) / 180;
-  const R = 6371000; // meters
-  const dLat = toRad(lat2 - lat1);
-  const dLon = toRad(lon2 - lon1);
-  const a =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
-    Math.sin(dLon / 2) * Math.sin(dLon / 2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return R * c;
+  const toRad = (x) => (x * Math.PI) / 180;
+  const R = 6371000; // meters
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+            Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+            Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
 }
 
-// ---------- Config ----------
-const DEMO_MODE = (process.env.DEMO_MODE || 'true') === 'true'; // Set to 'false' for real validation
+const DEMO_MODE = (process.env.DEMO_MODE || 'true') === 'true';
 const ACCEPTABLE_RADIUS_METERS = Number(process.env.ACCEPTABLE_RADIUS_METERS || 200);
 
-// ---------- Health endpoint ----------
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: Date.now(), demoMode: DEMO_MODE });
-});
+app.get('/health', (req, res) => res.json({ status: 'ok', demoMode: DEMO_MODE }));
 
-// ---------- Create user (secure, used by admin dashboards) ----------
+// 1. Create User (Updated for HOD & Department)
 app.post('/createUser', async (req, res) => {
-  try {
-    // ✅ MODIFIED: Added instituteName
-    const { email, password, firstName, lastName, role = 'student', instituteId = null, instituteName = '', extras = {} } = req.body;
-    if (!email || !password) return res.status(400).json({ error: 'email and password required' });
-
-    const userRecord = await admin.auth().createUser({ email, password, displayName: `${firstName || ''} ${lastName || ''}`.trim() });
-    const uid = userRecord.uid;
-
-    const userDoc = {
-      uid,
-      email,
-      role,
-      firstName: firstName || '',
-      lastName: lastName || '',
-      instituteId: instituteId || null,
-      // ✅ MODIFIED: Added instituteName to the user's profile
-      instituteName: instituteName || '', 
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      ...extras
-    };
-
-    await admin.firestore().collection('users').doc(uid).set(userDoc);
+  try {
+    const { email, password, firstName, lastName, role, instituteId, instituteName, department, extras = {} } = req.body;
     
-    // ✅ RE-ADDED: This is important for security rules
-    await admin.auth().setCustomUserClaims(uid, { role, instituteId });
+    if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
 
-    return res.json({ message: 'User created', uid });
-  } catch (err) {
-    console.error("/createUser error:", err);
-    if (err.code === 'auth/email-already-exists') {
-      return res.status(400).json({ error: 'Email already exists' });
-    }
-    return res.status(500).json({ error: 'Internal error' });
-  }
+    const userRecord = await admin.auth().createUser({
+      email,
+      password,
+      displayName: `${firstName} ${lastName}`
+    });
+
+    const userDoc = {
+      uid: userRecord.uid,
+      email,
+      role, // Can now be 'hod'
+      firstName,
+      lastName,
+      instituteId,
+      instituteName,
+      department: department || null, // Save department for HODs
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      ...extras
+    };
+
+    await admin.firestore().collection('users').doc(userRecord.uid).set(userDoc);
+    await admin.auth().setCustomUserClaims(userRecord.uid, { role, instituteId });
+
+    // In production, send email here. For hackathon, logging link.
+    const link = await admin.auth().generatePasswordResetLink(email);
+    console.log(`Password reset link for ${email}: ${link}`);
+
+    return res.json({ message: 'User created successfully', uid: userRecord.uid });
+  } catch (err) {
+    console.error("Error in /createUser:", err);
+    return res.status(500).json({ error: err.message });
+  }
 });
 
-// ---------- Mark attendance ----------
+// 2. Mark Attendance (Updated for Dynamic QR Validation)
 app.post('/markAttendance', async (req, res) => {
-  console.log("Received /markAttendance request");
-  try {
-    const authHeader = req.headers.authorization || '';
-    const token = authHeader.startsWith('Bearer ') ? authHeader.split('Bearer ')[1] : null;
-    if (!token) return res.status(401).json({ error: 'Missing authorization token' });
+  try {
+    const authHeader = req.headers.authorization || '';
+    const token = authHeader.split('Bearer ')[1];
+    if (!token) return res.status(401).json({ error: 'Missing token' });
 
-    const decoded = await admin.auth().verifyIdToken(token);
-    const studentUid = decoded.uid;
+    const decoded = await admin.auth().verifyIdToken(token);
+    const studentUid = decoded.uid;
+    const { sessionId, studentLocation } = req.body;
 
-    const { sessionId, studentLocation } = req.body;
-    if (!sessionId) return res.status(400).json({ error: 'sessionId is required' });
+    // --- DYNAMIC QR VALIDATION ---
+    // The frontend now sends "realSessionId|timestamp"
+    const [realSessionId, timestamp] = sessionId.split('|');
+    
+    if (!realSessionId) return res.status(400).json({ error: 'Invalid QR Code' });
 
-    const sessionRef = admin.firestore().collection('live_sessions').doc(sessionId);
-    const sessionSnap = await sessionRef.get();
-    if (!sessionSnap.exists) return res.status(404).json({ error: 'Session not found' });
+    // If there is a timestamp, verify it (15 seconds validity window)
+    if (timestamp) {
+        const qrTime = parseInt(timestamp);
+        const currentTime = Date.now();
+        const timeDiff = (currentTime - qrTime) / 1000; // in seconds
 
-    const session = sessionSnap.data();
-    if (!session.isActive) return res.status(400).json({ error: 'Session is not active' });
+        if (timeDiff > 15) {
+            return res.status(400).json({ error: 'QR Code Expired! Please scan the new code.' });
+        }
+    }
+    // -----------------------------
 
-    const userSnap = await admin.firestore().collection('users').doc(studentUid).get();
-    if (!userSnap.exists) return res.status(404).json({ error: 'Student profile not found' });
-    const studentProfile = userSnap.data();
+    const sessionRef = admin.firestore().collection('live_sessions').doc(realSessionId);
+    const sessionSnap = await sessionRef.get();
+    if (!sessionSnap.exists || !sessionSnap.data().isActive) {
+      return res.status(404).json({ error: 'Session not active' });
+    }
 
-    if (session.instituteId && studentProfile.instituteId && session.instituteId !== studentProfile.instituteId) {
-      return res.status(403).json({ error: 'Session does not belong to your institute' });
-    }
+    const session = sessionSnap.data();
+    
+    // Geo-Location Check
+    if (!DEMO_MODE) {
+        if (!session.location || !studentLocation) return res.status(400).json({ error: 'Location data missing' });
+        
+        const dist = getDistance(
+            session.location.latitude, session.location.longitude,
+            studentLocation.latitude, studentLocation.longitude
+        );
+        console.log(`Distance: ${dist}m`);
+        
+        if (dist > ACCEPTABLE_RADIUS_METERS) {
+            return res.status(403).json({ error: `Too far! You are ${Math.round(dist)}m away.` });
+        }
+    }
 
-    if (!DEMO_MODE) {
-      if (!session.location || !session.location.latitude || !session.location.longitude) {
-        return res.status(500).json({ error: 'Session has no classroom location recorded' });
-      }
-      if (!studentLocation || typeof studentLocation.latitude !== 'number' || typeof studentLocation.longitude !== 'number') {
-        return res.status(400).json({ error: 'studentLocation (lat/lng) required' });
-      }
+    // Mark Attendance
+    const userDoc = await admin.firestore().collection('users').doc(studentUid).get();
+    const studentData = userDoc.data();
 
-      const distance = getDistance(session.location.latitude, session.location.longitude, studentLocation.latitude, studentLocation.longitude);
-      console.log(`Distance (m): ${distance}`);
-      if (distance > ACCEPTABLE_RADIUS_METERS) {
-        return res.status(403).json({ error: `Attendance rejected. You are ${Math.round(distance)}m away.` });
-      }
-    } else {
-      console.log("DEMO_MODE enabled: skipping distance check.");
-    }
+    await admin.firestore().collection('attendance').doc(`${realSessionId}_${studentUid}`).set({
+      sessionId: realSessionId,
+      subject: session.subject || 'Class',
+      studentId: studentUid,
+      studentEmail: studentData.email,
+      firstName: studentData.firstName,
+      lastName: studentData.lastName,
+      rollNo: studentData.rollNo,
+      instituteId: studentData.instituteId,
+      timestamp: admin.firestore.FieldValue.serverTimestamp(),
+      status: 'Present'
+    });
 
-    const attendanceId = `${sessionId}_${studentUid}`;
-    const attendanceRef = admin.firestore().collection('attendance').doc(attendanceId);
+    return res.json({ message: 'Attendance Marked Successfully!' });
 
-    await attendanceRef.set({
-      sessionId,
-      // ✅ MODIFIED: This line adds the subject name
-      subject: session.subject || 'Class', 
-      studentId: studentUid,
-      studentEmail: studentProfile.email || null,
-      firstName: studentProfile.firstName || '',
-      lastName: studentProfile.lastName || '',
-      rollNo: studentProfile.rollNo || '',
-      instituteId: studentProfile.instituteId || null,
-      timestamp: admin.firestore.FieldValue.serverTimestamp(),
-      status: 'Present',
-      studentLocation: studentLocation || null,
-      verifiedByServer: !DEMO_MODE
-    }, { merge: true });
-
-    console.log(`Attendance saved for ${studentUid} in session ${sessionId}`);
-    return res.json({ message: 'Attendance marked successfully' });
-  } catch (err) {
-    console.error("Error in /markAttendance:", err);
-    if (err.code === 'auth/argument-error' || err.code === 'auth/id-token-expired' || err.code === 'auth/invalid-user-token') {
-      return res.status(401).json({ error: 'Invalid or expired token' });
-    }
-    return res.status(500).json({ error: 'Internal server error' });
-  }
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: err.message });
+  }
 });
 
-// ---------- Start server ----------
 const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => {
-  console.log(`Acadex backend running on port ${PORT}`);
-});
-
-// NO EXTRA "}" HERE
+app.listen(PORT, () => console.log(`Backend running on port ${PORT}`));
