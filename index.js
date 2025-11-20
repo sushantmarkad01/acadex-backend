@@ -40,7 +40,7 @@ const DEMO_MODE = (process.env.DEMO_MODE || 'true') === 'true';
 
 app.get('/health', (req, res) => res.json({ status: 'ok', demoMode: DEMO_MODE }));
 
-// 1. Create User Route
+// 1. Create User
 app.post('/createUser', async (req, res) => {
   try {
     const { email, password, firstName, lastName, role, instituteId, instituteName, department, extras = {} } = req.body;
@@ -54,7 +54,7 @@ app.post('/createUser', async (req, res) => {
   }
 });
 
-// 2. Mark Attendance Route
+// 2. Mark Attendance
 app.post('/markAttendance', async (req, res) => {
   try {
     const authHeader = req.headers.authorization || '';
@@ -71,13 +71,12 @@ app.post('/markAttendance', async (req, res) => {
     const sessionSnap = await sessionRef.get();
     if (!sessionSnap.exists || !sessionSnap.data().isActive) return res.status(404).json({ error: 'Session not active' });
 
-    const session = sessionSnap.data();
     const userDoc = await admin.firestore().collection('users').doc(studentUid).get();
     const studentData = userDoc.data();
 
     await admin.firestore().collection('attendance').doc(`${realSessionId}_${studentUid}`).set({
       sessionId: realSessionId,
-      subject: session.subject || 'Class',
+      subject: sessionSnap.data().subject || 'Class',
       studentId: studentUid,
       studentEmail: studentData.email,
       firstName: studentData.firstName,
@@ -93,26 +92,26 @@ app.post('/markAttendance', async (req, res) => {
   }
 });
 
-// 3. AI Chatbot Route (DIRECT REST API APPROACH)
+// 3. AI Chatbot Route (Using Gemini Pro)
 app.post('/chat', async (req, res) => {
     try {
         const { message, userContext } = req.body;
         const apiKey = process.env.GEMINI_API_KEY;
 
         if (!apiKey) {
-            console.error("GEMINI_API_KEY is missing in Render Environment");
+            console.error("GEMINI_API_KEY is missing");
             return res.status(500).json({ reply: "Server Error: API Key missing." });
         }
 
         const systemPrompt = `
-            You are 'AcadeX Mentor', an academic assistant for ${userContext.firstName}.
-            Context: Role: ${userContext.role}, Dept: ${userContext.department}.
-            Task: Suggest 3 short tasks (15-30 mins) related to ${userContext.department}.
-            Student says: "${message}". Keep response under 50 words. Be motivating.
+            You are 'AcadeX Mentor', for ${userContext.firstName}.
+            Dept: ${userContext.department}.
+            Suggest 3 short tasks (15-30 mins).
+            Student says: "${message}". Keep it under 50 words.
         `;
 
-        // Direct fetch call to Google API (Bypasses library version issues)
-        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`, {
+        // ✅ SWITCHED TO 'gemini-pro' (More stable availability)
+        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${apiKey}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -124,14 +123,12 @@ app.post('/chat', async (req, res) => {
 
         const data = await response.json();
 
-        // Error Handling from Google
         if (data.error) {
             console.error("Google API Error:", JSON.stringify(data.error, null, 2));
             return res.status(500).json({ reply: "AI Error: " + data.error.message });
         }
 
-        // Extract text
-        const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "No response generated.";
+        const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "No response.";
         res.json({ reply: text });
 
     } catch (error) {
