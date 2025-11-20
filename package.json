@@ -1,7 +1,7 @@
 {
   "name": "acadex-backend",
   "version": "1.0.0",
-  "description": "Secure backend for Acadex user creation",
+  "description": "Secure backend for Acadex",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -12,7 +12,7 @@
     "firebase-admin": "^11.5.0",
     "@google-cloud/firestore": "^7.0.0",
     "dotenv": "^16.3.1",
-    "@google/generative-ai": "^0.21.0"
+    "openai": "^4.28.0"
   },
   "engines": {
     "node": "18.x"
