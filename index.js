@@ -1,12 +1,18 @@
 const express = require('express');
 const admin = require('firebase-admin');
 const cors = require('cors');
+require('dotenv').config(); // 1. Import dotenv
+const { GoogleGenerativeAI } = require("@google/generative-ai"); // 2. Import Gemini
 
 const app = express();
 app.use(cors({ origin: true }));
 app.use(express.json());
 
-// Initialize Firebase Admin
+// --- INITIALIZE GEMINI AI ---
+// Make sure to add GEMINI_API_KEY in Render Environment Variables
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+
+// --- INITIALIZE FIREBASE ADMIN ---
 function initFirebaseAdmin() {
   const svcEnv = process.env.FIREBASE_SERVICE_ACCOUNT;
   if (svcEnv) {
@@ -49,9 +55,11 @@ function getDistance(lat1, lon1, lat2, lon2) {
 const DEMO_MODE = (process.env.DEMO_MODE || 'true') === 'true';
 const ACCEPTABLE_RADIUS_METERS = Number(process.env.ACCEPTABLE_RADIUS_METERS || 200);
 
+// --- ROUTES ---
+
 app.get('/health', (req, res) => res.json({ status: 'ok', demoMode: DEMO_MODE }));
 
-// 1. Create User (Updated for HOD & Department)
+// 1. Create User Route
 app.post('/createUser', async (req, res) => {
   try {
     const { email, password, firstName, lastName, role, instituteId, instituteName, department, extras = {} } = req.body;
@@ -67,12 +75,12 @@ app.post('/createUser', async (req, res) => {
     const userDoc = {
       uid: userRecord.uid,
       email,
-      role, // Can now be 'hod'
+      role, 
       firstName,
       lastName,
       instituteId,
       instituteName,
-      department: department || null, // Save department for HODs
+      department: department || null,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
       ...extras
     };
@@ -80,7 +88,7 @@ app.post('/createUser', async (req, res) => {
     await admin.firestore().collection('users').doc(userRecord.uid).set(userDoc);
     await admin.auth().setCustomUserClaims(userRecord.uid, { role, instituteId });
 
-    // In production, send email here. For hackathon, logging link.
+    // In production, send email here.
     const link = await admin.auth().generatePasswordResetLink(email);
     console.log(`Password reset link for ${email}: ${link}`);
 
@@ -91,7 +99,7 @@ app.post('/createUser', async (req, res) => {
   }
 });
 
-// 2. Mark Attendance (Updated for Dynamic QR Validation)
+// 2. Mark Attendance Route
 app.post('/markAttendance', async (req, res) => {
   try {
     const authHeader = req.headers.authorization || '';
@@ -102,23 +110,20 @@ app.post('/markAttendance', async (req, res) => {
     const studentUid = decoded.uid;
     const { sessionId, studentLocation } = req.body;
 
-    // --- DYNAMIC QR VALIDATION ---
-    // The frontend now sends "realSessionId|timestamp"
+    // Dynamic QR Validation
     const [realSessionId, timestamp] = sessionId.split('|');
     
     if (!realSessionId) return res.status(400).json({ error: 'Invalid QR Code' });
 
-    // If there is a timestamp, verify it (15 seconds validity window)
     if (timestamp) {
         const qrTime = parseInt(timestamp);
         const currentTime = Date.now();
-        const timeDiff = (currentTime - qrTime) / 1000; // in seconds
+        const timeDiff = (currentTime - qrTime) / 1000; 
 
         if (timeDiff > 15) {
             return res.status(400).json({ error: 'QR Code Expired! Please scan the new code.' });
         }
     }
-    // -----------------------------
 
     const sessionRef = admin.firestore().collection('live_sessions').doc(realSessionId);
     const sessionSnap = await sessionRef.get();
@@ -136,14 +141,12 @@ app.post('/markAttendance', async (req, res) => {
             session.location.latitude, session.location.longitude,
             studentLocation.latitude, studentLocation.longitude
         );
-        console.log(`Distance: ${dist}m`);
         
         if (dist > ACCEPTABLE_RADIUS_METERS) {
             return res.status(403).json({ error: `Too far! You are ${Math.round(dist)}m away.` });
         }
     }
 
-    // Mark Attendance
     const userDoc = await admin.firestore().collection('users').doc(studentUid).get();
     const studentData = userDoc.data();
 
@@ -166,6 +169,43 @@ app.post('/markAttendance', async (req, res) => {
     console.error(err);
     return res.status(500).json({ error: err.message });
   }
+});
+
+// 3. NEW: AI Chatbot Route
+app.post('/chat', async (req, res) => {
+    try {
+        const { message, userContext } = req.body;
+
+        // Construct System Prompt
+        const systemPrompt = `
+            You are 'AcadeX Mentor', an academic assistant for a student named ${userContext.firstName}.
+            
+            Context:
+            - Role: ${userContext.role}
+            - Department: ${userContext.department}
+            - Time: ${new Date().toLocaleTimeString()}
+            
+            Task:
+            The student has free time. Suggest 3 short, specific tasks (15-30 mins) strictly related to ${userContext.department}.
+            Include one technical task (coding/theory) and one soft-skill or fun task.
+            
+            Student says: "${message}"
+            
+            Keep the response under 50 words. Be motivating.
+        `;
+
+        // Call Gemini
+        const model = genAI.getGenerativeModel({ model: "gemini-pro"});
+        const result = await model.generateContent(systemPrompt);
+        const response = await result.response;
+        const text = response.text();
+
+        res.json({ reply: text });
+
+    } catch (error) {
+        console.error("AI Error:", error);
+        res.status(500).json({ reply: "My brain is buffering... try again in a minute!" });
+    }
 });
 
 const PORT = process.env.PORT || 8080;
