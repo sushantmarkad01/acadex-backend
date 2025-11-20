@@ -1,7 +1,6 @@
 {
   "name": "acadex-backend",
   "version": "1.0.0",
-  "description": "Secure backend for Acadex",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -10,9 +9,7 @@
     "cors": "^2.8.5",
     "express": "^4.17.3",
     "firebase-admin": "^11.5.0",
-    "@google-cloud/firestore": "^7.0.0",
-    "dotenv": "^16.3.1",
-    "@google/generative-ai": "^0.21.0"
+    "dotenv": "^16.3.1"
   },
   "engines": {
     "node": "18.x"
