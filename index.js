@@ -1,15 +1,15 @@
 const express = require('express');
 const admin = require('firebase-admin');
 const cors = require('cors');
-require('dotenv').config(); // 1. Import dotenv
-const { GoogleGenerativeAI } = require("@google/generative-ai"); // 2. Import Gemini
+require('dotenv').config(); // Load environment variables
+const { GoogleGenerativeAI } = require("@google/generative-ai");
 
 const app = express();
 app.use(cors({ origin: true }));
 app.use(express.json());
 
 // --- INITIALIZE GEMINI AI ---
-// Make sure to add GEMINI_API_KEY in Render Environment Variables
+// Ensure GEMINI_API_KEY is set in Render Environment Variables
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 // --- INITIALIZE FIREBASE ADMIN ---
@@ -88,7 +88,6 @@ app.post('/createUser', async (req, res) => {
     await admin.firestore().collection('users').doc(userRecord.uid).set(userDoc);
     await admin.auth().setCustomUserClaims(userRecord.uid, { role, instituteId });
 
-    // In production, send email here.
     const link = await admin.auth().generatePasswordResetLink(email);
     console.log(`Password reset link for ${email}: ${link}`);
 
@@ -110,19 +109,14 @@ app.post('/markAttendance', async (req, res) => {
     const studentUid = decoded.uid;
     const { sessionId, studentLocation } = req.body;
 
-    // Dynamic QR Validation
     const [realSessionId, timestamp] = sessionId.split('|');
-    
     if (!realSessionId) return res.status(400).json({ error: 'Invalid QR Code' });
 
     if (timestamp) {
         const qrTime = parseInt(timestamp);
         const currentTime = Date.now();
         const timeDiff = (currentTime - qrTime) / 1000; 
-
-        if (timeDiff > 15) {
-            return res.status(400).json({ error: 'QR Code Expired! Please scan the new code.' });
-        }
+        if (timeDiff > 15) return res.status(400).json({ error: 'QR Code Expired!' });
     }
 
     const sessionRef = admin.firestore().collection('live_sessions').doc(realSessionId);
@@ -133,18 +127,10 @@ app.post('/markAttendance', async (req, res) => {
 
     const session = sessionSnap.data();
     
-    // Geo-Location Check
     if (!DEMO_MODE) {
         if (!session.location || !studentLocation) return res.status(400).json({ error: 'Location data missing' });
-        
-        const dist = getDistance(
-            session.location.latitude, session.location.longitude,
-            studentLocation.latitude, studentLocation.longitude
-        );
-        
-        if (dist > ACCEPTABLE_RADIUS_METERS) {
-            return res.status(403).json({ error: `Too far! You are ${Math.round(dist)}m away.` });
-        }
+        const dist = getDistance(session.location.latitude, session.location.longitude, studentLocation.latitude, studentLocation.longitude);
+        if (dist > ACCEPTABLE_RADIUS_METERS) return res.status(403).json({ error: `Too far! You are ${Math.round(dist)}m away.` });
     }
 
     const userDoc = await admin.firestore().collection('users').doc(studentUid).get();
@@ -164,22 +150,19 @@ app.post('/markAttendance', async (req, res) => {
     });
 
     return res.json({ message: 'Attendance Marked Successfully!' });
-
   } catch (err) {
     console.error(err);
     return res.status(500).json({ error: err.message });
   }
 });
 
-// 3. NEW: AI Chatbot Route
+// 3. AI Chatbot Route
 app.post('/chat', async (req, res) => {
     try {
         const { message, userContext } = req.body;
 
-        // Construct System Prompt
         const systemPrompt = `
             You are 'AcadeX Mentor', an academic assistant for a student named ${userContext.firstName}.
-            
             Context:
             - Role: ${userContext.role}
             - Department: ${userContext.department}
@@ -187,14 +170,13 @@ app.post('/chat', async (req, res) => {
             
             Task:
             The student has free time. Suggest 3 short, specific tasks (15-30 mins) strictly related to ${userContext.department}.
-            Include one technical task (coding/theory) and one soft-skill or fun task.
+            Include one technical task and one soft-skill or fun task.
             
             Student says: "${message}"
             
             Keep the response under 50 words. Be motivating.
         `;
 
-        // Call Gemini
         const model = genAI.getGenerativeModel({ model: "gemini-pro"});
         const result = await model.generateContent(systemPrompt);
         const response = await result.response;
@@ -204,7 +186,7 @@ app.post('/chat', async (req, res) => {
 
     } catch (error) {
         console.error("AI Error:", error);
-        res.status(500).json({ reply: "My brain is buffering... try again in a minute!" });
+        res.status(500).json({ reply: "My brain is buffering... try again later!" });
     }
 });
 
