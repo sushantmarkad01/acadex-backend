@@ -9,7 +9,10 @@
     "cors": "^2.8.5",
     "express": "^4.17.3",
     "firebase-admin": "^11.5.0",
-    "dotenv": "^16.3.1"
+    "@google-cloud/firestore": "^7.0.0",
+    "dotenv": "^16.3.1",
+    "@google/generative-ai": "^0.21.0",
+    "nodemailer": "^6.9.0"
   },
   "engines": {
     "node": "18.x"
