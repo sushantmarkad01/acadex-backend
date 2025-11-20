@@ -1,7 +1,7 @@
 const express = require('express');
 const admin = require('firebase-admin');
 const cors = require('cors');
-require('dotenv').config(); // Load environment variables
+require('dotenv').config(); 
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 
 const app = express();
@@ -9,7 +9,6 @@ app.use(cors({ origin: true }));
 app.use(express.json());
 
 // --- INITIALIZE GEMINI AI ---
-// Ensure GEMINI_API_KEY is set in Render Environment Variables
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 // --- INITIALIZE FIREBASE ADMIN ---
@@ -42,7 +41,7 @@ initFirebaseAdmin();
 // Utility: Haversine Distance
 function getDistance(lat1, lon1, lat2, lon2) {
   const toRad = (x) => (x * Math.PI) / 180;
-  const R = 6371000; // meters
+  const R = 6371000; 
   const dLat = toRad(lat2 - lat1);
   const dLon = toRad(lon2 - lon1);
   const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
@@ -156,7 +155,7 @@ app.post('/markAttendance', async (req, res) => {
   }
 });
 
-// 3. AI Chatbot Route
+// 3. AI Chatbot Route (UPDATED MODEL NAME)
 app.post('/chat', async (req, res) => {
     try {
         const { message, userContext } = req.body;
@@ -177,7 +176,8 @@ app.post('/chat', async (req, res) => {
             Keep the response under 50 words. Be motivating.
         `;
 
-        const model = genAI.getGenerativeModel({ model: "gemini-pro"});
+        // ✅ FIXED: Using 'gemini-1.5-flash' which is valid and faster
+        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash"});
         const result = await model.generateContent(systemPrompt);
         const response = await result.response;
         const text = response.text();
