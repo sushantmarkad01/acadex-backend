@@ -92,7 +92,7 @@ app.post('/markAttendance', async (req, res) => {
   }
 });
 
-// 3. AI Chatbot Route (Using Gemini Pro)
+// 3. AI Chatbot Route
 app.post('/chat', async (req, res) => {
     try {
         const { message, userContext } = req.body;
@@ -110,7 +110,6 @@ app.post('/chat', async (req, res) => {
             Student says: "${message}". Keep it under 50 words.
         `;
 
-        // ✅ SWITCHED TO 'gemini-pro' (More stable availability)
         const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${apiKey}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -135,6 +134,35 @@ app.post('/chat', async (req, res) => {
         console.error("Server Error:", error);
         res.status(500).json({ reply: "My brain is buffering... (Server Error)" });
     }
+});
+
+// 4. ✅ NEW: Submit Institute Application Route
+app.post('/submitApplication', async (req, res) => {
+  try {
+    const { instituteName, contactName, email, phone, message } = req.body;
+
+    // Basic Validation
+    if (!instituteName || !contactName || !email) {
+      return res.status(400).json({ error: 'Missing required fields (Name, Contact, Email)' });
+    }
+
+    // Use Admin SDK to write to Firestore (Bypasses Security Rules)
+    await admin.firestore().collection('applications').add({
+      instituteName,
+      contactName,
+      email,
+      phone: phone || '',
+      message: message || '',
+      status: 'pending',
+      submittedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    return res.json({ message: 'Application submitted successfully!' });
+
+  } catch (err) {
+    console.error("Application Error:", err);
+    return res.status(500).json({ error: err.message });
+  }
 });
 
 const PORT = process.env.PORT || 8080;
