@@ -2,14 +2,16 @@ const express = require('express');
 const admin = require('firebase-admin');
 const cors = require('cors');
 require('dotenv').config(); 
-const { GoogleGenerativeAI } = require("@google/generative-ai");
+const OpenAI = require('openai'); // ✅ CHANGED: Import OpenAI
 
 const app = express();
 app.use(cors({ origin: true }));
 app.use(express.json());
 
-// --- INITIALIZE GEMINI AI ---
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+// --- INITIALIZE OPENAI ---
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY, // ✅ Make sure to add this in Render
+});
 
 // --- INITIALIZE FIREBASE ADMIN ---
 function initFirebaseAdmin() {
@@ -155,7 +157,7 @@ app.post('/markAttendance', async (req, res) => {
   }
 });
 
-// 3. AI Chatbot Route (UPDATED MODEL NAME)
+// 3. AI Chatbot Route (SWITCHED TO OPENAI)
 app.post('/chat', async (req, res) => {
     try {
         const { message, userContext } = req.body;
@@ -176,16 +178,26 @@ app.post('/chat', async (req, res) => {
             Keep the response under 50 words. Be motivating.
         `;
 
-        // ✅ FIXED: Using 'gemini-1.5-flash' which is valid and faster
-        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash"});
-        const result = await model.generateContent(systemPrompt);
-        const response = await result.response;
-        const text = response.text();
+        // ✅ CALLING OPENAI API
+        const completion = await openai.chat.completions.create({
+            messages: [
+                { role: "system", content: systemPrompt },
+                { role: "user", content: message }
+            ],
+            model: "gpt-4o-mini", // Latest, cheapest, and fastest model
+            max_tokens: 100,
+        });
+
+        const text = completion.choices[0].message.content;
 
         res.json({ reply: text });
 
     } catch (error) {
         console.error("AI Error:", error);
+        // Check for quota error
+        if (error.code === 'insufficient_quota') {
+             return res.status(500).json({ reply: "You ran out of free AI credits. Please check OpenAI billing." });
+        }
         res.status(500).json({ reply: "My brain is buffering... try again later!" });
     }
 });
