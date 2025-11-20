@@ -177,7 +177,7 @@ app.post('/chat', async (req, res) => {
         `;
 
         // ✅ FIXED: Using 'gemini-1.5-flash' which is valid and faster
-        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash"});
+        const model = genAI.getGenerativeModel({ model: "gemini-pro"});
         const result = await model.generateContent(systemPrompt);
         const response = await result.response;
         const text = response.text();
