@@ -9,15 +9,14 @@ const app = express();
 app.use(cors({ origin: true }));
 app.use(express.json());
 
-// --- 1. CONFIG: EMAIL TRANSPORTER (FIXED FOR RENDER) ---
-// We use explicit SMTP settings to prevent timeouts
+// --- 1. CONFIG: EMAIL TRANSPORTER (BREVO SMTP) ---
 const transporter = nodemailer.createTransport({
-  host: 'smtp.gmail.com',
-  port: 587,
-  secure: false, // Use `true` for port 465, `false` for all other ports
+  host: "smtp-relay.brevo.com", // ✅ Brevo Server
+  port: 587,                    // ✅ Standard Port
+  secure: false,                // ✅ False for 587
   auth: {
-    user: process.env.EMAIL_USER, 
-    pass: process.env.EMAIL_PASS  
+    user: process.env.EMAIL_USER, // Your Brevo Login Email
+    pass: process.env.EMAIL_PASS  // Your Brevo SMTP Key (NOT your login password)
   }
 });
 
@@ -46,11 +45,13 @@ initFirebaseAdmin();
 
 const DEMO_MODE = (process.env.DEMO_MODE || 'true') === 'true';
 
-// --- ROUTES ---
+// =======================
+//        ROUTES
+// =======================
 
 app.get('/health', (req, res) => res.json({ status: 'ok', demoMode: DEMO_MODE }));
 
-// 1. Create User & Send Email
+// Route 1: Create User (Safe Email)
 app.post('/createUser', async (req, res) => {
   try {
     const { email, password, firstName, lastName, role, instituteId, instituteName, department, subject, rollNo, qualification, extras = {} } = req.body;
@@ -80,17 +81,25 @@ app.post('/createUser', async (req, res) => {
     await admin.firestore().collection('users').doc(userRecord.uid).set(userDoc);
     await admin.auth().setCustomUserClaims(userRecord.uid, { role, instituteId });
 
-    // Send Email (Background)
-    const link = await admin.auth().generatePasswordResetLink(email);
-    const mailOptions = {
-        from: '"AcadeX Admin" <' + process.env.EMAIL_USER + '>',
-        to: email,
-        subject: 'Welcome to AcadeX - Set Your Password',
-        html: `<p>Hello ${firstName}, your account is ready. <a href="${link}">Set Password</a></p>`
-    };
-    
-    // Don't await email to prevent timeout errors on the frontend
-    transporter.sendMail(mailOptions).catch(err => console.error("Email failed:", err));
+    // ✅ Send Email via Brevo
+    admin.auth().generatePasswordResetLink(email)
+        .then(link => {
+            const mailOptions = {
+                from: '"AcadeX Admin" <' + process.env.EMAIL_USER + '>', // Shows as "AcadeX Admin"
+                to: email,
+                subject: 'Welcome to AcadeX - Set Your Password',
+                html: `
+                  <div style="font-family: Arial, sans-serif; padding: 20px; border: 1px solid #e0e0e0; border-radius: 10px;">
+                    <h2 style="color: #2563eb;">Welcome to AcadeX!</h2>
+                    <p>Hello <strong>${firstName}</strong>,</p>
+                    <p>Your account has been created as a <strong>${role}</strong>.</p>
+                    <a href="${link}" style="background-color: #2563eb; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block;">Set Password</a>
+                  </div>
+                `
+            };
+            transporter.sendMail(mailOptions).catch(e => console.error("Email failed:", e));
+        })
+        .catch(e => console.error("Link generation failed:", e));
 
     return res.json({ message: 'User created successfully', uid: userRecord.uid });
 
@@ -100,7 +109,7 @@ app.post('/createUser', async (req, res) => {
   }
 });
 
-// 2. Mark Attendance
+// Route 2: Mark Attendance
 app.post('/markAttendance', async (req, res) => {
   try {
     const authHeader = req.headers.authorization || '';
@@ -111,8 +120,14 @@ app.post('/markAttendance', async (req, res) => {
     const studentUid = decoded.uid;
     const { sessionId, studentLocation } = req.body;
 
-    const [realSessionId] = sessionId.split('|');
+    const [realSessionId, timestamp] = sessionId.split('|');
     if (!realSessionId) return res.status(400).json({ error: 'Invalid QR Code' });
+
+    if (timestamp) {
+        const qrTime = parseInt(timestamp);
+        const timeDiff = (Date.now() - qrTime) / 1000;
+        if (timeDiff > 15) return res.status(400).json({ error: 'QR Code Expired!' });
+    }
 
     const sessionRef = admin.firestore().collection('live_sessions').doc(realSessionId);
     const sessionSnap = await sessionRef.get();
@@ -123,7 +138,7 @@ app.post('/markAttendance', async (req, res) => {
     if (!DEMO_MODE) {
         if (!session.location || !studentLocation) return res.status(400).json({ error: 'Location data missing' });
         const dist = getDistance(session.location.latitude, session.location.longitude, studentLocation.latitude, studentLocation.longitude);
-        if (dist > 200) return res.status(403).json({ error: `Too far! You are ${Math.round(dist)}m away.` });
+        if (dist > ACCEPTABLE_RADIUS_METERS) return res.status(403).json({ error: `Too far! You are ${Math.round(dist)}m away.` });
     }
 
     const userDoc = await admin.firestore().collection('users').doc(studentUid).get();
@@ -148,7 +163,7 @@ app.post('/markAttendance', async (req, res) => {
   }
 });
 
-// 3. AI Chatbot
+// Route 3: AI Chatbot
 app.post('/chat', async (req, res) => {
     try {
         const { message, userContext } = req.body;
@@ -166,12 +181,11 @@ app.post('/chat', async (req, res) => {
         const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "No response.";
         res.json({ reply: text });
     } catch (error) {
-        console.error("AI Error:", error);
         res.status(500).json({ reply: "My brain is buffering..." });
     }
 });
 
-// 4. Submit Application
+// Route 4: Submit Application
 app.post('/submitApplication', async (req, res) => {
   try {
     const { instituteName, contactName, email, phone, message } = req.body;
@@ -184,7 +198,7 @@ app.post('/submitApplication', async (req, res) => {
   } catch (err) { return res.status(500).json({ error: err.message }); }
 });
 
-// 5. Delete Users
+// Route 5: Delete Users
 app.post('/deleteUsers', async (req, res) => {
   try {
     const { userIds } = req.body;
@@ -203,16 +217,17 @@ app.post('/deleteUsers', async (req, res) => {
   } catch (err) { return res.status(500).json({ error: err.message }); }
 });
 
-// 6. Debug Email
+// Route 6: Debug Email (Updated for Brevo)
 app.post('/debug-email', async (req, res) => {
     const { testEmail } = req.body;
+    console.log("Sending test email via Brevo to:", testEmail);
     try {
         await transporter.verify();
         const info = await transporter.sendMail({
             from: `"AcadeX Debug" <${process.env.EMAIL_USER}>`,
             to: testEmail,
-            subject: "AcadeX Connection Test",
-            text: "Email is working via SMTP!"
+            subject: "AcadeX Brevo Test",
+            text: "Email is working via Brevo SMTP!"
         });
         res.json({ success: true, info });
     } catch (error) {
