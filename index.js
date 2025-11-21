@@ -250,5 +250,22 @@ app.post('/deleteUsers', async (req, res) => {
   } catch (err) { return res.status(500).json({ error: err.message }); }
 });
 
+
+// Route 6: Delete Department
+app.post('/deleteDepartment', async (req, res) => {
+  try {
+    const { deptId } = req.body;
+    if (!deptId) return res.status(400).json({ error: 'Department ID is required' });
+
+    // Delete from Firestore
+    await admin.firestore().collection('departments').doc(deptId).delete();
+
+    return res.json({ message: 'Department deleted successfully.' });
+  } catch (err) {
+    console.error("Delete Dept Error:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => console.log(`Backend running on port ${PORT}`));
