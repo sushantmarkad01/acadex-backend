@@ -9,7 +9,7 @@ const app = express();
 app.use(cors({ origin: true }));
 app.use(express.json());
 
-// --- 1. CONFIG: EMAIL TRANSPORTER (Nodemailer) ---
+// --- 1. CONFIG: EMAIL TRANSPORTER ---
 const transporter = nodemailer.createTransport({
   service: 'gmail', 
   auth: {
@@ -18,11 +18,10 @@ const transporter = nodemailer.createTransport({
   }
 });
 
-// --- 2. CONFIG: GOOGLE GEMINI AI ---
-// Using 'gemini-pro' as it is the most stable model currently
+// --- 2. CONFIG: GOOGLE AI ---
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-// --- 3. CONFIG: FIREBASE ADMIN ---
+// --- 3. CONFIG: FIREBASE ---
 function initFirebaseAdmin() {
   const svcEnv = process.env.FIREBASE_SERVICE_ACCOUNT;
   if (svcEnv) {
@@ -49,29 +48,13 @@ function initFirebaseAdmin() {
 }
 initFirebaseAdmin();
 
-// --- UTILITIES ---
-function getDistance(lat1, lon1, lat2, lon2) {
-  const toRad = (x) => (x * Math.PI) / 180;
-  const R = 6371000; // meters
-  const dLat = toRad(lat2 - lat1);
-  const dLon = toRad(lon2 - lon1);
-  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-            Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
-            Math.sin(dLon / 2) * Math.sin(dLon / 2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return R * c;
-}
-
 const DEMO_MODE = (process.env.DEMO_MODE || 'true') === 'true';
-const ACCEPTABLE_RADIUS_METERS = Number(process.env.ACCEPTABLE_RADIUS_METERS || 200);
 
-// =======================
-//        ROUTES
-// =======================
+// --- ROUTES ---
 
 app.get('/health', (req, res) => res.json({ status: 'ok', demoMode: DEMO_MODE }));
 
-// Route 1: Create User & Send Email
+// Route 1: Create User (Safe Email)
 app.post('/createUser', async (req, res) => {
   try {
     const { email, password, firstName, lastName, role, instituteId, instituteName, department, extras = {} } = req.body;
@@ -100,31 +83,35 @@ app.post('/createUser', async (req, res) => {
     await admin.firestore().collection('users').doc(userRecord.uid).set(userDoc);
     await admin.auth().setCustomUserClaims(userRecord.uid, { role, instituteId });
 
-    // 3. Generate Password Reset Link
-    const link = await admin.auth().generatePasswordResetLink(email);
+    // 3. Generate Link & Send Email (SAFE MODE)
+    try {
+        const link = await admin.auth().generatePasswordResetLink(email);
+        
+        const mailOptions = {
+          from: '"AcadeX Admin" <' + process.env.EMAIL_USER + '>',
+          to: email,
+          subject: 'Welcome to AcadeX - Set Your Password',
+          html: `
+            <div style="font-family: Arial, sans-serif; padding: 20px; border: 1px solid #e0e0e0; border-radius: 10px; max-width: 600px; margin: 0 auto;">
+              <h2 style="color: #2563eb; text-align: center;">Welcome to AcadeX! 🎓</h2>
+              <p>Hello <strong>${firstName}</strong>,</p>
+              <p>Your account has been created as a <strong>${role}</strong> at <strong>${instituteName}</strong>.</p>
+              <div style="text-align: center; margin: 30px 0;">
+                <a href="${link}" style="background-color: #2563eb; color: white; padding: 12px 25px; text-decoration: none; border-radius: 5px; font-weight: bold;">Set Your Password</a>
+              </div>
+              <p style="color: #666; font-size: 12px;">If the button doesn't work, copy this link: <br/> ${link}</p>
+            </div>
+          `
+        };
 
-    // 4. Send Email via Nodemailer
-    const mailOptions = {
-      from: '"AcadeX Admin" <' + process.env.EMAIL_USER + '>',
-      to: email,
-      subject: 'Welcome to AcadeX - Set Your Password',
-      html: `
-        <div style="font-family: Arial, sans-serif; padding: 20px; border: 1px solid #e0e0e0; border-radius: 10px; max-width: 600px; margin: 0 auto;">
-          <h2 style="color: #2563eb; text-align: center;">Welcome to AcadeX! 🎓</h2>
-          <p>Hello <strong>${firstName}</strong>,</p>
-          <p>Your account has been successfully created as a <strong>${role}</strong> at <strong>${instituteName}</strong>.</p>
-          <div style="text-align: center; margin: 30px 0;">
-            <a href="${link}" style="background-color: #2563eb; color: white; padding: 12px 25px; text-decoration: none; border-radius: 5px; font-weight: bold;">Set Your Password</a>
-          </div>
-          <p style="color: #666; font-size: 12px;">If the button doesn't work, copy this link: <br/> ${link}</p>
-        </div>
-      `
-    };
+        await transporter.sendMail(mailOptions);
+        console.log(`Email sent to ${email}`);
+    } catch (emailErr) {
+        console.error("⚠️ User created, but Email FAILED to send:", emailErr.message);
+        // We continue successfully even if email fails!
+    }
 
-    await transporter.sendMail(mailOptions);
-    console.log(`Email sent successfully to ${email}`);
-
-    return res.json({ message: 'User created & Email sent!', uid: userRecord.uid });
+    return res.json({ message: 'User created successfully', uid: userRecord.uid });
 
   } catch (err) {
     console.error("Create User Error:", err);
@@ -143,15 +130,8 @@ app.post('/markAttendance', async (req, res) => {
     const studentUid = decoded.uid;
     const { sessionId, studentLocation } = req.body;
 
-    // Dynamic QR Check
     const [realSessionId, timestamp] = sessionId.split('|');
     if (!realSessionId) return res.status(400).json({ error: 'Invalid QR Code' });
-
-    if (timestamp) {
-        const qrTime = parseInt(timestamp);
-        const timeDiff = (Date.now() - qrTime) / 1000;
-        if (timeDiff > 15) return res.status(400).json({ error: 'QR Code Expired!' });
-    }
 
     const sessionRef = admin.firestore().collection('live_sessions').doc(realSessionId);
     const sessionSnap = await sessionRef.get();
@@ -159,7 +139,6 @@ app.post('/markAttendance', async (req, res) => {
 
     const session = sessionSnap.data();
     
-    // Geo-Location Check
     if (!DEMO_MODE) {
         if (!session.location || !studentLocation) return res.status(400).json({ error: 'Location data missing' });
         const dist = getDistance(session.location.latitude, session.location.longitude, studentLocation.latitude, studentLocation.longitude);
@@ -183,14 +162,12 @@ app.post('/markAttendance', async (req, res) => {
     });
 
     return res.json({ message: 'Attendance Marked Successfully!' });
-
   } catch (err) {
-    console.error(err);
     return res.status(500).json({ error: err.message });
   }
 });
 
-// Route 3: AI Chatbot (Google Gemini)
+// Route 3: AI Chatbot (Using Gemini Pro)
 app.post('/chat', async (req, res) => {
     try {
         const { message, userContext } = req.body;
@@ -208,7 +185,6 @@ app.post('/chat', async (req, res) => {
             Student says: "${message}". Keep it under 50 words.
         `;
 
-        // Using 'gemini-pro' for stability
         const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${apiKey}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
