@@ -230,5 +230,54 @@ app.post('/deleteDepartment', async (req, res) => {
   } catch (err) { return res.status(500).json({ error: err.message }); }
 });
 
+// Route 7: Generate Career Roadmap
+app.post('/generateRoadmap', async (req, res) => {
+    try {
+        const { goal, department } = req.body;
+        const apiKey = process.env.GROQ_API_KEY;
+
+        if (!goal) return res.status(400).json({ error: "Goal is required" });
+
+        const systemPrompt = `
+            You are an expert career counselor. Create a 4-Week Learning Roadmap for a ${department} student who wants to become a "${goal}".
+            
+            Output STRICT JSON format ONLY. No intro text.
+            Structure:
+            {
+              "weeks": [
+                {
+                  "week": 1,
+                  "theme": "Fundamentals",
+                  "topics": ["Topic 1", "Topic 2", "Topic 3"]
+                },
+                ... (4 weeks total)
+              ]
+            }
+        `;
+
+        const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+            method: "POST",
+            headers: {
+                "Authorization": `Bearer ${apiKey}`,
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                messages: [{ role: "system", content: systemPrompt }],
+                model: "llama-3.3-70b-versatile",
+                response_format: { type: "json_object" } // ✅ Force JSON Mode
+            })
+        });
+
+        const data = await response.json();
+        const roadmapJSON = JSON.parse(data.choices[0].message.content);
+
+        res.json({ roadmap: roadmapJSON });
+
+    } catch (error) {
+        console.error("Roadmap Error:", error);
+        res.status(500).json({ error: "Failed to generate roadmap" });
+    }
+});
+
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => console.log(`Backend running on port ${PORT}`));
