@@ -168,7 +168,7 @@ app.post('/chat', async (req, res) => {
                     { role: "system", content: systemPrompt },
                     { role: "user", content: message }
                 ],
-                model: "llama3-8b-8192" 
+                model: "llama-3.3-70b-versatile" 
             })
         });
 
