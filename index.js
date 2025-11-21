@@ -9,9 +9,12 @@ const app = express();
 app.use(cors({ origin: true }));
 app.use(express.json());
 
-// --- 1. CONFIG: EMAIL TRANSPORTER ---
+// --- 1. CONFIG: EMAIL TRANSPORTER (FIXED FOR RENDER) ---
+// We use explicit SMTP settings to prevent timeouts
 const transporter = nodemailer.createTransport({
-  service: 'gmail', 
+  host: 'smtp.gmail.com',
+  port: 587,
+  secure: false, // Use `true` for port 465, `false` for all other ports
   auth: {
     user: process.env.EMAIL_USER, 
     pass: process.env.EMAIL_PASS  
@@ -32,45 +35,22 @@ function initFirebaseAdmin() {
       admin.initializeApp({ credential: admin.credential.cert(svcJson) });
       console.log("Firebase Admin initialized from env var.");
       return;
-    } catch (err) {
-      console.error("Failed to parse env var:", err);
-      process.exit(1);
-    }
+    } catch (err) { console.error(err); process.exit(1); }
   }
   try {
     const local = require('./serviceAccountKey.json');
     admin.initializeApp({ credential: admin.credential.cert(local) });
-    console.log("Firebase Admin initialized from local file.");
-  } catch (err) {
-    console.error("No service account configured.");
-    process.exit(1);
-  }
+  } catch (err) { console.error(err); process.exit(1); }
 }
 initFirebaseAdmin();
 
 const DEMO_MODE = (process.env.DEMO_MODE || 'true') === 'true';
-const ACCEPTABLE_RADIUS_METERS = Number(process.env.ACCEPTABLE_RADIUS_METERS || 200);
 
-// --- UTILITIES ---
-function getDistance(lat1, lon1, lat2, lon2) {
-  const toRad = (x) => (x * Math.PI) / 180;
-  const R = 6371000; 
-  const dLat = toRad(lat2 - lat1);
-  const dLon = toRad(lon2 - lon1);
-  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-            Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
-            Math.sin(dLon / 2) * Math.sin(dLon / 2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return R * c;
-}
-
-// =======================
-//        ROUTES
-// =======================
+// --- ROUTES ---
 
 app.get('/health', (req, res) => res.json({ status: 'ok', demoMode: DEMO_MODE }));
 
-// Route 1: Create User (Fast - Background Email)
+// 1. Create User & Send Email
 app.post('/createUser', async (req, res) => {
   try {
     const { email, password, firstName, lastName, role, instituteId, instituteName, department, subject, rollNo, qualification, extras = {} } = req.body;
@@ -100,18 +80,17 @@ app.post('/createUser', async (req, res) => {
     await admin.firestore().collection('users').doc(userRecord.uid).set(userDoc);
     await admin.auth().setCustomUserClaims(userRecord.uid, { role, instituteId });
 
-    // Background Email (Does not block response)
-    admin.auth().generatePasswordResetLink(email)
-        .then(link => {
-            const mailOptions = {
-                from: '"AcadeX Admin" <' + process.env.EMAIL_USER + '>',
-                to: email,
-                subject: 'Welcome to AcadeX',
-                html: `<p>Hello ${firstName}, your account is ready. <a href="${link}">Set Password</a></p>`
-            };
-            transporter.sendMail(mailOptions).catch(e => console.error("Email failed:", e));
-        })
-        .catch(e => console.error("Link generation failed:", e));
+    // Send Email (Background)
+    const link = await admin.auth().generatePasswordResetLink(email);
+    const mailOptions = {
+        from: '"AcadeX Admin" <' + process.env.EMAIL_USER + '>',
+        to: email,
+        subject: 'Welcome to AcadeX - Set Your Password',
+        html: `<p>Hello ${firstName}, your account is ready. <a href="${link}">Set Password</a></p>`
+    };
+    
+    // Don't await email to prevent timeout errors on the frontend
+    transporter.sendMail(mailOptions).catch(err => console.error("Email failed:", err));
 
     return res.json({ message: 'User created successfully', uid: userRecord.uid });
 
@@ -121,7 +100,7 @@ app.post('/createUser', async (req, res) => {
   }
 });
 
-// Route 2: Mark Attendance
+// 2. Mark Attendance
 app.post('/markAttendance', async (req, res) => {
   try {
     const authHeader = req.headers.authorization || '';
@@ -132,14 +111,8 @@ app.post('/markAttendance', async (req, res) => {
     const studentUid = decoded.uid;
     const { sessionId, studentLocation } = req.body;
 
-    const [realSessionId, timestamp] = sessionId.split('|');
+    const [realSessionId] = sessionId.split('|');
     if (!realSessionId) return res.status(400).json({ error: 'Invalid QR Code' });
-
-    if (timestamp) {
-        const qrTime = parseInt(timestamp);
-        const timeDiff = (Date.now() - qrTime) / 1000;
-        if (timeDiff > 15) return res.status(400).json({ error: 'QR Code Expired!' });
-    }
 
     const sessionRef = admin.firestore().collection('live_sessions').doc(realSessionId);
     const sessionSnap = await sessionRef.get();
@@ -150,7 +123,7 @@ app.post('/markAttendance', async (req, res) => {
     if (!DEMO_MODE) {
         if (!session.location || !studentLocation) return res.status(400).json({ error: 'Location data missing' });
         const dist = getDistance(session.location.latitude, session.location.longitude, studentLocation.latitude, studentLocation.longitude);
-        if (dist > ACCEPTABLE_RADIUS_METERS) return res.status(403).json({ error: `Too far! You are ${Math.round(dist)}m away.` });
+        if (dist > 200) return res.status(403).json({ error: `Too far! You are ${Math.round(dist)}m away.` });
     }
 
     const userDoc = await admin.firestore().collection('users').doc(studentUid).get();
@@ -175,36 +148,30 @@ app.post('/markAttendance', async (req, res) => {
   }
 });
 
-// Route 3: AI Chatbot
+// 3. AI Chatbot
 app.post('/chat', async (req, res) => {
     try {
         const { message, userContext } = req.body;
         const apiKey = process.env.GEMINI_API_KEY;
-
         if (!apiKey) return res.status(500).json({ reply: "Server Error: API Key missing." });
 
-        const systemPrompt = `
-            You are 'AcadeX Mentor', for ${userContext.firstName}.
-            Dept: ${userContext.department}.
-            Suggest 3 short tasks (15-30 mins).
-            Student says: "${message}". Keep it under 50 words.
-        `;
+        const systemPrompt = `AcadeX Mentor for ${userContext.firstName}. Dept: ${userContext.department}. Suggest 3 short tasks. Student says: "${message}".`;
 
-        // Using 'gemini-pro' via Library
-        const model = genAI.getGenerativeModel({ model: "gemini-pro"});
-        const result = await model.generateContent(systemPrompt);
-        const response = await result.response;
-        const text = response.text();
+        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${apiKey}`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ contents: [{ parts: [{ text: systemPrompt + "\n\nStudent: " + message }] }] })
+        });
 
+        const data = await response.json();
+        const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "No response.";
         res.json({ reply: text });
-
     } catch (error) {
         console.error("AI Error:", error);
         res.status(500).json({ reply: "My brain is buffering..." });
     }
 });
 
-// Route 4: Submit Application
+// 4. Submit Application
 app.post('/submitApplication', async (req, res) => {
   try {
     const { instituteName, contactName, email, phone, message } = req.body;
@@ -217,7 +184,7 @@ app.post('/submitApplication', async (req, res) => {
   } catch (err) { return res.status(500).json({ error: err.message }); }
 });
 
-// Route 5: Delete Users
+// 5. Delete Users
 app.post('/deleteUsers', async (req, res) => {
   try {
     const { userIds } = req.body;
@@ -236,17 +203,16 @@ app.post('/deleteUsers', async (req, res) => {
   } catch (err) { return res.status(500).json({ error: err.message }); }
 });
 
-// Route 6: Debug Email
+// 6. Debug Email
 app.post('/debug-email', async (req, res) => {
     const { testEmail } = req.body;
-    console.log("Sending test email to:", testEmail);
     try {
         await transporter.verify();
         const info = await transporter.sendMail({
             from: `"AcadeX Debug" <${process.env.EMAIL_USER}>`,
             to: testEmail,
             subject: "AcadeX Connection Test",
-            text: "Email is working!"
+            text: "Email is working via SMTP!"
         });
         res.json({ success: true, info });
     } catch (error) {
