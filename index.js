@@ -279,5 +279,43 @@ app.post('/generateRoadmap', async (req, res) => {
     }
 });
 
+// Route 8: Complete Task (+50 XP) with Anti-Spam
+app.post('/completeTask', async (req, res) => {
+  try {
+    const { uid, taskSummary } = req.body; // We now accept a summary too
+    if (!uid) return res.status(400).json({ error: 'UID missing' });
+
+    const userRef = admin.firestore().collection('users').doc(uid);
+    const userSnap = await userRef.get();
+    const userData = userSnap.data();
+
+    // 1. ANTI-SPAM CHECK: Minimum 15 minutes between tasks
+    const now = admin.firestore.Timestamp.now();
+    const lastTime = userData.lastTaskTime;
+
+    if (lastTime) {
+        const diffMinutes = (now.toMillis() - lastTime.toMillis()) / (1000 * 60);
+        if (diffMinutes < 15) {
+            return res.status(429).json({ 
+                error: `Wait ${Math.ceil(15 - diffMinutes)} mins before claiming more XP!` 
+            });
+        }
+    }
+
+    // 2. Award XP & Save Summary
+    await userRef.update({
+        xp: admin.firestore.FieldValue.increment(50),
+        lastTaskTime: now,
+        // We can optionally save their summaries to a sub-collection for audit
+    });
+
+    return res.json({ message: 'Task Verified! +50 XP' });
+
+  } catch (err) { 
+      console.error("XP Error:", err);
+      return res.status(500).json({ error: err.message }); 
+  }
+});
+
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => console.log(`Backend running on port ${PORT}`));
