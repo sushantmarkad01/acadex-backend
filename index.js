@@ -18,10 +18,10 @@ const transporter = nodemailer.createTransport({
   }
 });
 
-// --- 2. CONFIG: GOOGLE AI ---
+// --- 2. CONFIG: GOOGLE GEMINI AI ---
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-// --- 3. CONFIG: FIREBASE ---
+// --- 3. CONFIG: FIREBASE ADMIN ---
 function initFirebaseAdmin() {
   const svcEnv = process.env.FIREBASE_SERVICE_ACCOUNT;
   if (svcEnv) {
@@ -50,23 +50,29 @@ initFirebaseAdmin();
 
 const DEMO_MODE = (process.env.DEMO_MODE || 'true') === 'true';
 
-// --- ROUTES ---
+// =======================
+//        ROUTES
+// =======================
 
 app.get('/health', (req, res) => res.json({ status: 'ok', demoMode: DEMO_MODE }));
 
-// Route 1: Create User (Safe Email)
+// Route 1: Create User (FIXED: Now saves Subject/RollNo)
 app.post('/createUser', async (req, res) => {
   try {
-    const { email, password, firstName, lastName, role, instituteId, instituteName, department, extras = {} } = req.body;
+    // ✅ FIXED: Explicitly extract 'subject', 'rollNo', 'qualification'
+    const { 
+        email, password, firstName, lastName, role, 
+        instituteId, instituteName, department, 
+        subject, rollNo, qualification, // <--- Added these
+        extras = {} 
+    } = req.body;
     
-    // 1. Create User in Firebase Auth
     const userRecord = await admin.auth().createUser({
       email,
       password,
       displayName: `${firstName} ${lastName}`
     });
 
-    // 2. Create User Doc in Firestore
     const userDoc = {
       uid: userRecord.uid,
       email,
@@ -76,6 +82,10 @@ app.post('/createUser', async (req, res) => {
       instituteId,
       instituteName,
       department: department || null,
+      // ✅ FIXED: Save these fields to Firestore
+      subject: subject || null,
+      rollNo: rollNo || null,
+      qualification: qualification || null,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
       ...extras
     };
@@ -83,32 +93,26 @@ app.post('/createUser', async (req, res) => {
     await admin.firestore().collection('users').doc(userRecord.uid).set(userDoc);
     await admin.auth().setCustomUserClaims(userRecord.uid, { role, instituteId });
 
-    // 3. Generate Link & Send Email (SAFE MODE)
+    // Send Email (Safe Mode)
     try {
         const link = await admin.auth().generatePasswordResetLink(email);
-        
         const mailOptions = {
           from: '"AcadeX Admin" <' + process.env.EMAIL_USER + '>',
           to: email,
           subject: 'Welcome to AcadeX - Set Your Password',
           html: `
-            <div style="font-family: Arial, sans-serif; padding: 20px; border: 1px solid #e0e0e0; border-radius: 10px; max-width: 600px; margin: 0 auto;">
-              <h2 style="color: #2563eb; text-align: center;">Welcome to AcadeX! 🎓</h2>
+            <div style="font-family: Arial, sans-serif; padding: 20px; border: 1px solid #e0e0e0; border-radius: 10px;">
+              <h2 style="color: #2563eb;">Welcome to AcadeX!</h2>
               <p>Hello <strong>${firstName}</strong>,</p>
-              <p>Your account has been created as a <strong>${role}</strong> at <strong>${instituteName}</strong>.</p>
-              <div style="text-align: center; margin: 30px 0;">
-                <a href="${link}" style="background-color: #2563eb; color: white; padding: 12px 25px; text-decoration: none; border-radius: 5px; font-weight: bold;">Set Your Password</a>
-              </div>
-              <p style="color: #666; font-size: 12px;">If the button doesn't work, copy this link: <br/> ${link}</p>
+              <p>Your account has been created as a <strong>${role}</strong>.</p>
+              <a href="${link}" style="background-color: #2563eb; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block;">Set Password</a>
             </div>
           `
         };
-
         await transporter.sendMail(mailOptions);
         console.log(`Email sent to ${email}`);
     } catch (emailErr) {
-        console.error("⚠️ User created, but Email FAILED to send:", emailErr.message);
-        // We continue successfully even if email fails!
+        console.error("⚠️ Email failed (User still created):", emailErr.message);
     }
 
     return res.json({ message: 'User created successfully', uid: userRecord.uid });
@@ -132,6 +136,12 @@ app.post('/markAttendance', async (req, res) => {
 
     const [realSessionId, timestamp] = sessionId.split('|');
     if (!realSessionId) return res.status(400).json({ error: 'Invalid QR Code' });
+
+    if (timestamp) {
+        const qrTime = parseInt(timestamp);
+        const timeDiff = (Date.now() - qrTime) / 1000;
+        if (timeDiff > 15) return res.status(400).json({ error: 'QR Code Expired!' });
+    }
 
     const sessionRef = admin.firestore().collection('live_sessions').doc(realSessionId);
     const sessionSnap = await sessionRef.get();
@@ -167,75 +177,63 @@ app.post('/markAttendance', async (req, res) => {
   }
 });
 
-// Route 3: AI Chatbot (Using Gemini Pro)
+// Route 3: AI Chatbot
 app.post('/chat', async (req, res) => {
     try {
         const { message, userContext } = req.body;
         const apiKey = process.env.GEMINI_API_KEY;
 
-        if (!apiKey) {
-            console.error("GEMINI_API_KEY is missing");
-            return res.status(500).json({ reply: "Server Error: API Key missing." });
-        }
+        if (!apiKey) return res.status(500).json({ reply: "Server Error: API Key missing." });
 
-        const systemPrompt = `
-            You are 'AcadeX Mentor', for ${userContext.firstName}.
-            Dept: ${userContext.department}.
-            Suggest 3 short tasks (15-30 mins).
-            Student says: "${message}". Keep it under 50 words.
-        `;
+        const systemPrompt = `AcadeX Mentor for ${userContext.firstName}. Dept: ${userContext.department}. Suggest 3 short tasks. Student says: "${message}".`;
 
         const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${apiKey}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                contents: [{
-                    parts: [{ text: systemPrompt + "\n\nStudent: " + message }]
-                }]
-            })
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ contents: [{ parts: [{ text: systemPrompt + "\n\nStudent: " + message }] }] })
         });
 
         const data = await response.json();
-
-        if (data.error) {
-            console.error("Google API Error:", JSON.stringify(data.error, null, 2));
-            return res.status(500).json({ reply: "AI Error: " + data.error.message });
-        }
+        if (data.error) return res.status(500).json({ reply: "AI Error: " + data.error.message });
 
         const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "No response.";
         res.json({ reply: text });
 
     } catch (error) {
         console.error("Server Error:", error);
-        res.status(500).json({ reply: "My brain is buffering... (Server Error)" });
+        res.status(500).json({ reply: "My brain is buffering..." });
     }
 });
 
-// Route 4: Submit Institute Application
+// Route 4: Submit Application
 app.post('/submitApplication', async (req, res) => {
   try {
     const { instituteName, contactName, email, phone, message } = req.body;
-
-    if (!instituteName || !contactName || !email) {
-      return res.status(400).json({ error: 'Missing required fields' });
-    }
+    if (!instituteName || !contactName || !email) return res.status(400).json({ error: 'Missing fields' });
 
     await admin.firestore().collection('applications').add({
-      instituteName,
-      contactName,
-      email,
-      phone: phone || '',
-      message: message || '',
-      status: 'pending',
-      submittedAt: admin.firestore.FieldValue.serverTimestamp(),
+      instituteName, contactName, email, phone, message, status: 'pending', submittedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
+    return res.json({ message: 'Success' });
+  } catch (err) { return res.status(500).json({ error: err.message }); }
+});
 
-    return res.json({ message: 'Application submitted successfully!' });
+// Route 5: Delete Users
+app.post('/deleteUsers', async (req, res) => {
+  try {
+    const { userIds } = req.body;
+    if (!userIds || userIds.length === 0) return res.status(400).json({ error: 'No users selected.' });
 
-  } catch (err) {
-    console.error("Application Error:", err);
-    return res.status(500).json({ error: err.message });
-  }
+    try { await admin.auth().deleteUsers(userIds); } catch (authErr) { console.error(authErr); }
+
+    const batch = admin.firestore().batch();
+    userIds.forEach((uid) => {
+        const userRef = admin.firestore().collection('users').doc(uid);
+        batch.delete(userRef);
+    });
+    await batch.commit();
+
+    return res.json({ message: `Deleted ${userIds.length} users.` });
+  } catch (err) { return res.status(500).json({ error: err.message }); }
 });
 
 const PORT = process.env.PORT || 8080;
