@@ -12,8 +12,8 @@ app.use(express.json());
 // --- 1. CONFIG: EMAIL TRANSPORTER (BREVO SMTP) ---
 const transporter = nodemailer.createTransport({
   host: "smtp-relay.brevo.com", // ✅ Brevo Server
-  port: 465,                    // ✅ Standard Port
-  secure: true,                // ✅ False for 587
+  port: 2525,                    // ✅ Standard Port
+  secure: false,                // ✅ False for 587
   auth: {
     user: process.env.EMAIL_USER, // Your Brevo Login Email
     pass: process.env.EMAIL_PASS  // Your Brevo SMTP Key (NOT your login password)
