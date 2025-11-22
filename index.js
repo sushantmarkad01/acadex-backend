@@ -2,15 +2,12 @@ const express = require('express');
 const admin = require('firebase-admin');
 const cors = require('cors');
 require('dotenv').config(); 
-const { GoogleGenerativeAI } = require("@google/generative-ai");
 
 const app = express();
 app.use(cors({ origin: true }));
 app.use(express.json());
 
-// --- CONFIG ---
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-
+// --- CONFIG: FIREBASE ADMIN ---
 function initFirebaseAdmin() {
   const svcEnv = process.env.FIREBASE_SERVICE_ACCOUNT;
   if (svcEnv) {
@@ -19,6 +16,7 @@ function initFirebaseAdmin() {
         ? JSON.parse(Buffer.from(svcEnv, 'base64').toString('utf8'))
         : JSON.parse(svcEnv);
       admin.initializeApp({ credential: admin.credential.cert(svcJson) });
+      console.log("Firebase Admin initialized.");
       return;
     } catch (err) { console.error(err); process.exit(1); }
   }
@@ -32,7 +30,7 @@ initFirebaseAdmin();
 const DEMO_MODE = (process.env.DEMO_MODE || 'true') === 'true';
 const ACCEPTABLE_RADIUS_METERS = Number(process.env.ACCEPTABLE_RADIUS_METERS || 200);
 
-// --- UTILITY: Distance ---
+// --- UTILITIES ---
 function getDistance(lat1, lon1, lat2, lon2) {
   const toRad = (x) => (x * Math.PI) / 180;
   const R = 6371000; 
@@ -45,29 +43,24 @@ function getDistance(lat1, lon1, lat2, lon2) {
   return R * c;
 }
 
-// --- 🏆 BADGE ENGINE LOGIC ---
+// --- 🏆 BADGE ENGINE LOGIC (NEW) ---
 const BADGE_RULES = [
-    { id: 'novice', name: 'Novice', icon: '🌱', threshold: 100 },
-    { id: 'enthusiast', name: 'Enthusiast', icon: '🔥', threshold: 500 },
-    { id: 'expert', name: 'Expert', icon: '💎', threshold: 1000 },
-    { id: 'master', name: 'Master', icon: '👑', threshold: 2000 }
+    { id: 'novice', threshold: 100 },
+    { id: 'enthusiast', threshold: 500 },
+    { id: 'expert', threshold: 1000 },
+    { id: 'master', threshold: 2000 }
 ];
 
-// Helper: Checks and awards badges based on new XP
 async function checkAndAwardBadges(userRef, currentXp, currentBadges = []) {
     let newBadges = [];
-    
     BADGE_RULES.forEach(badge => {
         if (currentXp >= badge.threshold && !currentBadges.includes(badge.id)) {
             newBadges.push(badge.id);
         }
     });
-
     if (newBadges.length > 0) {
-        await userRef.update({
-            badges: admin.firestore.FieldValue.arrayUnion(...newBadges)
-        });
-        return newBadges; // Return newly earned badges to notify frontend
+        await userRef.update({ badges: admin.firestore.FieldValue.arrayUnion(...newBadges) });
+        return newBadges; 
     }
     return [];
 }
@@ -78,13 +71,14 @@ async function checkAndAwardBadges(userRef, currentXp, currentBadges = []) {
 
 app.get('/health', (req, res) => res.json({ status: 'ok', demoMode: DEMO_MODE }));
 
-// 1. Create User
+// Route 1: Create User
 app.post('/createUser', async (req, res) => {
   try {
     const { email, password, firstName, lastName, role, instituteId, instituteName, department, subject, rollNo, qualification, extras = {} } = req.body;
     const userRecord = await admin.auth().createUser({ email, password, displayName: `${firstName} ${lastName}` });
     const userDoc = { 
-        uid: userRecord.uid, email, role, firstName, lastName, instituteId, instituteName, department: department || null, subject: subject || null, rollNo: rollNo || null, qualification: qualification || null, 
+        uid: userRecord.uid, email, role, firstName, lastName, instituteId, instituteName, 
+        department: department || null, subject: subject || null, rollNo: rollNo || null, qualification: qualification || null,
         xp: 0, badges: [], // ✅ Init XP and Badges
         createdAt: admin.firestore.FieldValue.serverTimestamp(), ...extras 
     };
@@ -94,7 +88,7 @@ app.post('/createUser', async (req, res) => {
   } catch (err) { return res.status(500).json({ error: err.message }); }
 });
 
-// 2. Mark Attendance (+10 XP + Badge Check)
+// Route 2: Mark Attendance (+10 XP + Badge Check)
 app.post('/markAttendance', async (req, res) => {
   try {
     const authHeader = req.headers.authorization || '';
@@ -103,7 +97,7 @@ app.post('/markAttendance', async (req, res) => {
     const decoded = await admin.auth().verifyIdToken(token);
     const studentUid = decoded.uid;
     const { sessionId, studentLocation } = req.body;
-    const [realSessionId] = sessionId.split('|');
+    const [realSessionId, timestamp] = sessionId.split('|');
     
     const sessionRef = admin.firestore().collection('live_sessions').doc(realSessionId);
     const sessionSnap = await sessionRef.get();
@@ -117,34 +111,110 @@ app.post('/markAttendance', async (req, res) => {
     const userRef = admin.firestore().collection('users').doc(studentUid);
     const userSnap = await userRef.get();
     
-    // Prevent Duplicate XP
     const attRef = admin.firestore().collection('attendance').doc(`${realSessionId}_${studentUid}`);
     if ((await attRef.get()).exists) return res.json({ message: 'Already marked!' });
 
-    // Save Attendance
     await attRef.set({
       sessionId: realSessionId, subject: sessionSnap.data().subject, studentId: studentUid, 
       firstName: userSnap.data().firstName, lastName: userSnap.data().lastName, rollNo: userSnap.data().rollNo, 
       timestamp: admin.firestore.FieldValue.serverTimestamp(), status: 'Present'
     });
 
-    // ✅ Award XP
+    // ✅ Award XP & Check Badges
     const newXp = (userSnap.data().xp || 0) + 10;
     await userRef.update({ xp: newXp });
-    
-    // ✅ Check Badges
     const newBadges = await checkAndAwardBadges(userRef, newXp, userSnap.data().badges);
 
-    return res.json({ 
-        message: 'Attendance Marked!', 
-        xpGained: 10,
-        newBadges: newBadges 
-    });
-
+    return res.json({ message: 'Attendance Marked! +10 XP', newBadges });
   } catch (err) { return res.status(500).json({ error: err.message }); }
 });
 
-// 3. Complete Task (+50 XP + Badge Check)
+// Route 3: AI Chatbot (GROQ API)
+app.post('/chat', async (req, res) => {
+    try {
+        const { message, userContext } = req.body;
+        const apiKey = process.env.GROQ_API_KEY;
+
+        if (!apiKey) {
+            console.error("GROQ_API_KEY missing");
+            return res.status(500).json({ reply: "Server Error: API Key missing." });
+        }
+
+        const systemPrompt = `
+            You are 'AcadeX Mentor', for ${userContext.firstName}.
+            Dept: ${userContext.department}.
+            Suggest 3 short tasks (15-30 mins).
+            Student says: "${message}". Keep response under 50 words.
+        `;
+
+        const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+            method: "POST",
+            headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
+            body: JSON.stringify({
+                messages: [{ role: "system", content: systemPrompt }, { role: "user", content: message }],
+                model: "llama-3.3-70b-versatile"
+            })
+        });
+
+        const data = await response.json();
+        if (data.error) return res.status(500).json({ reply: "AI Error: " + data.error.message });
+
+        const text = data.choices?.[0]?.message?.content || "No response.";
+        res.json({ reply: text });
+
+    } catch (error) {
+        console.error("AI Error:", error);
+        res.status(500).json({ reply: "Brain buffering..." });
+    }
+});
+
+// Route 4: Submit Application
+app.post('/submitApplication', async (req, res) => {
+  try {
+    const { instituteName, contactName, email, phone, message } = req.body;
+    await admin.firestore().collection('applications').add({ instituteName, contactName, email, phone, message, status: 'pending', submittedAt: admin.firestore.FieldValue.serverTimestamp() });
+    return res.json({ message: 'Success' });
+  } catch (err) { return res.status(500).json({ error: err.message }); }
+});
+
+// Route 5: Delete Users
+app.post('/deleteUsers', async (req, res) => {
+  try {
+    const { userIds } = req.body;
+    try { await admin.auth().deleteUsers(userIds); } catch (authErr) { console.error(authErr); }
+    const batch = admin.firestore().batch();
+    userIds.forEach((uid) => { batch.delete(admin.firestore().collection('users').doc(uid)); });
+    await batch.commit();
+    return res.json({ message: `Deleted ${userIds.length} users.` });
+  } catch (err) { return res.status(500).json({ error: err.message }); }
+});
+
+// Route 6: Delete Department
+app.post('/deleteDepartment', async (req, res) => {
+  try {
+    const { deptId } = req.body;
+    await admin.firestore().collection('departments').doc(deptId).delete();
+    return res.json({ message: 'Deleted.' });
+  } catch (err) { return res.status(500).json({ error: err.message }); }
+});
+
+// Route 7: Generate Roadmap
+app.post('/generateRoadmap', async (req, res) => {
+    try {
+        const { goal, department } = req.body;
+        const apiKey = process.env.GROQ_API_KEY;
+        const systemPrompt = `Create 4-Week Roadmap for ${department} student to become "${goal}". Output JSON: { "weeks": [{ "week": 1, "theme": "...", "topics": ["..."] }] }`;
+        const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+            method: "POST", headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
+            body: JSON.stringify({ messages: [{ role: "system", content: systemPrompt }], model: "llama-3.3-70b-versatile", response_format: { type: "json_object" } })
+        });
+        const data = await response.json();
+        const roadmapJSON = JSON.parse(data.choices[0].message.content);
+        res.json({ roadmap: roadmapJSON });
+    } catch (error) { res.status(500).json({ error: "Failed" }); }
+});
+
+// Route 8: Complete Task (+50 XP + Badge Check)
 app.post('/completeTask', async (req, res) => {
   try {
     const { uid } = req.body;
@@ -154,7 +224,7 @@ app.post('/completeTask', async (req, res) => {
     const userSnap = await userRef.get();
     const userData = userSnap.data();
 
-    // Anti-Spam (15 min cooldown)
+    // Anti-Spam
     const now = admin.firestore.Timestamp.now();
     const lastTime = userData.lastTaskTime;
     if (lastTime && (now.toMillis() - lastTime.toMillis()) / (1000 * 60) < 15) {
@@ -163,164 +233,13 @@ app.post('/completeTask', async (req, res) => {
 
     // ✅ Award XP
     const newXp = (userData.xp || 0) + 50;
-    await userRef.update({
-        xp: newXp,
-        lastTaskTime: now
-    });
+    await userRef.update({ xp: newXp, lastTaskTime: now });
 
     // ✅ Check Badges
     const newBadges = await checkAndAwardBadges(userRef, newXp, userData.badges);
 
-    return res.json({ 
-        message: 'Task Verified! +50 XP', 
-        newBadges: newBadges 
-    });
-
+    return res.json({ message: 'Task Verified! +50 XP', newBadges });
   } catch (err) { return res.status(500).json({ error: err.message }); }
-});
-
-// 4. AI Chatbot (Groq)
-app.post('/chat', async (req, res) => {
-    try {
-        const { message, userContext } = req.body;
-        const apiKey = process.env.GROQ_API_KEY;
-        const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-            method: "POST",
-            headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
-            body: JSON.stringify({ messages: [{ role: "system", content: `Mentor for ${userContext.firstName}` }, { role: "user", content: message }], model: "llama3-8b-8192" })
-        });
-        const data = await response.json();
-        res.json({ reply: data.choices?.[0]?.message?.content || "No response." });
-    } catch (error) { res.status(500).json({ reply: "Error." }); }
-});
-
-// Route 5: Submit Application
-app.post('/submitApplication', async (req, res) => {
-  try {
-    const { instituteName, contactName, email, phone, message } = req.body;
-    if (!instituteName || !contactName || !email) return res.status(400).json({ error: 'Missing fields' });
-
-    await admin.firestore().collection('applications').add({
-      instituteName, contactName, email, phone, message, status: 'pending', submittedAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
-    return res.json({ message: 'Success' });
-  } catch (err) { return res.status(500).json({ error: err.message }); }
-});
-
-// Route 6: Delete Users
-app.post('/deleteUsers', async (req, res) => {
-  try {
-    const { userIds } = req.body;
-    if (!userIds || userIds.length === 0) return res.status(400).json({ error: 'No users selected.' });
-
-    try { await admin.auth().deleteUsers(userIds); } catch (authErr) { console.error(authErr); }
-
-    const batch = admin.firestore().batch();
-    userIds.forEach((uid) => {
-        const userRef = admin.firestore().collection('users').doc(uid);
-        batch.delete(userRef);
-    });
-    await batch.commit();
-
-    return res.json({ message: `Deleted ${userIds.length} users.` });
-  } catch (err) { return res.status(500).json({ error: err.message }); }
-});
-
-// Route 7: Delete Department
-app.post('/deleteDepartment', async (req, res) => {
-  try {
-    const { deptId } = req.body;
-    if (!deptId) return res.status(400).json({ error: 'Department ID is required' });
-    await admin.firestore().collection('departments').doc(deptId).delete();
-    return res.json({ message: 'Department deleted successfully.' });
-  } catch (err) { return res.status(500).json({ error: err.message }); }
-});
-
-// Route 8: Generate Career Roadmap
-app.post('/generateRoadmap', async (req, res) => {
-    try {
-        const { goal, department } = req.body;
-        const apiKey = process.env.GROQ_API_KEY;
-
-        if (!goal) return res.status(400).json({ error: "Goal is required" });
-
-        const systemPrompt = `
-            You are an expert career counselor. Create a 4-Week Learning Roadmap for a ${department} student who wants to become a "${goal}".
-            
-            Output STRICT JSON format ONLY. No intro text.
-            Structure:
-            {
-              "weeks": [
-                {
-                  "week": 1,
-                  "theme": "Fundamentals",
-                  "topics": ["Topic 1", "Topic 2", "Topic 3"]
-                },
-                ... (4 weeks total)
-              ]
-            }
-        `;
-
-        const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-            method: "POST",
-            headers: {
-                "Authorization": `Bearer ${apiKey}`,
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-                messages: [{ role: "system", content: systemPrompt }],
-                model: "llama-3.3-70b-versatile",
-                response_format: { type: "json_object" } // ✅ Force JSON Mode
-            })
-        });
-
-        const data = await response.json();
-        const roadmapJSON = JSON.parse(data.choices[0].message.content);
-
-        res.json({ roadmap: roadmapJSON });
-
-    } catch (error) {
-        console.error("Roadmap Error:", error);
-        res.status(500).json({ error: "Failed to generate roadmap" });
-    }
-});
-
-// Route 9: Complete Task (+50 XP) with Anti-Spam
-app.post('/completeTask', async (req, res) => {
-  try {
-    const { uid, taskSummary } = req.body; // We now accept a summary too
-    if (!uid) return res.status(400).json({ error: 'UID missing' });
-
-    const userRef = admin.firestore().collection('users').doc(uid);
-    const userSnap = await userRef.get();
-    const userData = userSnap.data();
-
-    // 1. ANTI-SPAM CHECK: Minimum 15 minutes between tasks
-    const now = admin.firestore.Timestamp.now();
-    const lastTime = userData.lastTaskTime;
-
-    if (lastTime) {
-        const diffMinutes = (now.toMillis() - lastTime.toMillis()) / (1000 * 60);
-        if (diffMinutes < 15) {
-            return res.status(429).json({ 
-                error: `Wait ${Math.ceil(15 - diffMinutes)} mins before claiming more XP!` 
-            });
-        }
-    }
-
-    // 2. Award XP & Save Summary
-    await userRef.update({
-        xp: admin.firestore.FieldValue.increment(50),
-        lastTaskTime: now,
-        // We can optionally save their summaries to a sub-collection for audit
-    });
-
-    return res.json({ message: 'Task Verified! +50 XP' });
-
-  } catch (err) { 
-      console.error("XP Error:", err);
-      return res.status(500).json({ error: err.message }); 
-  }
 });
 
 const PORT = process.env.PORT || 8080;
