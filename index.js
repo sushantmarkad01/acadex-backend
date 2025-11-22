@@ -2,12 +2,15 @@ const express = require('express');
 const admin = require('firebase-admin');
 const cors = require('cors');
 require('dotenv').config(); 
+const { GoogleGenerativeAI } = require("@google/generative-ai");
 
 const app = express();
 app.use(cors({ origin: true }));
 app.use(express.json());
 
-// --- CONFIG: FIREBASE ADMIN ---
+// --- CONFIG ---
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+
 function initFirebaseAdmin() {
   const svcEnv = process.env.FIREBASE_SERVICE_ACCOUNT;
   if (svcEnv) {
@@ -16,7 +19,6 @@ function initFirebaseAdmin() {
         ? JSON.parse(Buffer.from(svcEnv, 'base64').toString('utf8'))
         : JSON.parse(svcEnv);
       admin.initializeApp({ credential: admin.credential.cert(svcJson) });
-      console.log("Firebase Admin initialized.");
       return;
     } catch (err) { console.error(err); process.exit(1); }
   }
@@ -28,8 +30,9 @@ function initFirebaseAdmin() {
 initFirebaseAdmin();
 
 const DEMO_MODE = (process.env.DEMO_MODE || 'true') === 'true';
+const ACCEPTABLE_RADIUS_METERS = Number(process.env.ACCEPTABLE_RADIUS_METERS || 200);
 
-// --- UTILITIES ---
+// --- UTILITY: Distance ---
 function getDistance(lat1, lon1, lat2, lon2) {
   const toRad = (x) => (x * Math.PI) / 180;
   const R = 6371000; 
@@ -42,153 +45,156 @@ function getDistance(lat1, lon1, lat2, lon2) {
   return R * c;
 }
 
+// --- 🏆 BADGE ENGINE LOGIC ---
+const BADGE_RULES = [
+    { id: 'novice', name: 'Novice', icon: '🌱', threshold: 100 },
+    { id: 'enthusiast', name: 'Enthusiast', icon: '🔥', threshold: 500 },
+    { id: 'expert', name: 'Expert', icon: '💎', threshold: 1000 },
+    { id: 'master', name: 'Master', icon: '👑', threshold: 2000 }
+];
+
+// Helper: Checks and awards badges based on new XP
+async function checkAndAwardBadges(userRef, currentXp, currentBadges = []) {
+    let newBadges = [];
+    
+    BADGE_RULES.forEach(badge => {
+        if (currentXp >= badge.threshold && !currentBadges.includes(badge.id)) {
+            newBadges.push(badge.id);
+        }
+    });
+
+    if (newBadges.length > 0) {
+        await userRef.update({
+            badges: admin.firestore.FieldValue.arrayUnion(...newBadges)
+        });
+        return newBadges; // Return newly earned badges to notify frontend
+    }
+    return [];
+}
+
 // =======================
 //        ROUTES
 // =======================
 
 app.get('/health', (req, res) => res.json({ status: 'ok', demoMode: DEMO_MODE }));
 
-// Route 1: Create User (Database Only - Frontend sends Email)
+// 1. Create User
 app.post('/createUser', async (req, res) => {
   try {
     const { email, password, firstName, lastName, role, instituteId, instituteName, department, subject, rollNo, qualification, extras = {} } = req.body;
-    
-    const userRecord = await admin.auth().createUser({
-      email,
-      password,
-      displayName: `${firstName} ${lastName}`
-    });
-
-    const userDoc = {
-      uid: userRecord.uid,
-      email,
-      role, 
-      firstName,
-      lastName,
-      instituteId,
-      instituteName,
-      department: department || null,
-      subject: subject || null,
-      rollNo: rollNo || null,
-      qualification: qualification || null,
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      ...extras
+    const userRecord = await admin.auth().createUser({ email, password, displayName: `${firstName} ${lastName}` });
+    const userDoc = { 
+        uid: userRecord.uid, email, role, firstName, lastName, instituteId, instituteName, department: department || null, subject: subject || null, rollNo: rollNo || null, qualification: qualification || null, 
+        xp: 0, badges: [], // ✅ Init XP and Badges
+        createdAt: admin.firestore.FieldValue.serverTimestamp(), ...extras 
     };
-
     await admin.firestore().collection('users').doc(userRecord.uid).set(userDoc);
     await admin.auth().setCustomUserClaims(userRecord.uid, { role, instituteId });
-
     return res.json({ message: 'User created successfully', uid: userRecord.uid });
-
-  } catch (err) {
-    console.error("Create User Error:", err);
-    return res.status(500).json({ error: err.message });
-  }
+  } catch (err) { return res.status(500).json({ error: err.message }); }
 });
 
-// Route 2: Mark Attendance
+// 2. Mark Attendance (+10 XP + Badge Check)
 app.post('/markAttendance', async (req, res) => {
   try {
     const authHeader = req.headers.authorization || '';
     const token = authHeader.split('Bearer ')[1];
     if (!token) return res.status(401).json({ error: 'Missing token' });
-
     const decoded = await admin.auth().verifyIdToken(token);
     const studentUid = decoded.uid;
     const { sessionId, studentLocation } = req.body;
-
-    const [realSessionId, timestamp] = sessionId.split('|');
-    if (!realSessionId) return res.status(400).json({ error: 'Invalid QR Code' });
-
-    if (timestamp) {
-        const qrTime = parseInt(timestamp);
-        const timeDiff = (Date.now() - qrTime) / 1000;
-        if (timeDiff > 15) return res.status(400).json({ error: 'QR Code Expired!' });
-    }
-
+    const [realSessionId] = sessionId.split('|');
+    
     const sessionRef = admin.firestore().collection('live_sessions').doc(realSessionId);
     const sessionSnap = await sessionRef.get();
     if (!sessionSnap.exists || !sessionSnap.data().isActive) return res.status(404).json({ error: 'Session not active' });
-    
+
     if (!DEMO_MODE) {
-        if (!session.location || !studentLocation) return res.status(400).json({ error: 'Location data missing' });
-        const dist = getDistance(session.location.latitude, session.location.longitude, studentLocation.latitude, studentLocation.longitude);
-        if (dist > ACCEPTABLE_RADIUS_METERS) return res.status(403).json({ error: `Too far! You are ${Math.round(dist)}m away.` });
+        const dist = getDistance(sessionSnap.data().location.latitude, sessionSnap.data().location.longitude, studentLocation.latitude, studentLocation.longitude);
+        if (dist > ACCEPTABLE_RADIUS_METERS) return res.status(403).json({ error: `Too far!` });
     }
 
-    const userDoc = await admin.firestore().collection('users').doc(studentUid).get();
-    const studentData = userDoc.data();
+    const userRef = admin.firestore().collection('users').doc(studentUid);
+    const userSnap = await userRef.get();
+    
+    // Prevent Duplicate XP
+    const attRef = admin.firestore().collection('attendance').doc(`${realSessionId}_${studentUid}`);
+    if ((await attRef.get()).exists) return res.json({ message: 'Already marked!' });
 
-    await admin.firestore().collection('attendance').doc(`${realSessionId}_${studentUid}`).set({
-      sessionId: realSessionId,
-      subject: session.subject || 'Class',
-      studentId: studentUid,
-      studentEmail: studentData.email,
-      firstName: studentData.firstName,
-      lastName: studentData.lastName,
-      rollNo: studentData.rollNo,
-      instituteId: studentData.instituteId,
-      timestamp: admin.firestore.FieldValue.serverTimestamp(),
-      status: 'Present'
+    // Save Attendance
+    await attRef.set({
+      sessionId: realSessionId, subject: sessionSnap.data().subject, studentId: studentUid, 
+      firstName: userSnap.data().firstName, lastName: userSnap.data().lastName, rollNo: userSnap.data().rollNo, 
+      timestamp: admin.firestore.FieldValue.serverTimestamp(), status: 'Present'
     });
 
-    return res.json({ message: 'Attendance Marked Successfully!' });
-  } catch (err) {
-    return res.status(500).json({ error: err.message });
-  }
+    // ✅ Award XP
+    const newXp = (userSnap.data().xp || 0) + 10;
+    await userRef.update({ xp: newXp });
+    
+    // ✅ Check Badges
+    const newBadges = await checkAndAwardBadges(userRef, newXp, userSnap.data().badges);
+
+    return res.json({ 
+        message: 'Attendance Marked!', 
+        xpGained: 10,
+        newBadges: newBadges 
+    });
+
+  } catch (err) { return res.status(500).json({ error: err.message }); }
 });
 
-// Route 3: AI Chatbot (GROQ API)
+// 3. Complete Task (+50 XP + Badge Check)
+app.post('/completeTask', async (req, res) => {
+  try {
+    const { uid } = req.body;
+    if (!uid) return res.status(400).json({ error: 'UID missing' });
+
+    const userRef = admin.firestore().collection('users').doc(uid);
+    const userSnap = await userRef.get();
+    const userData = userSnap.data();
+
+    // Anti-Spam (15 min cooldown)
+    const now = admin.firestore.Timestamp.now();
+    const lastTime = userData.lastTaskTime;
+    if (lastTime && (now.toMillis() - lastTime.toMillis()) / (1000 * 60) < 15) {
+        return res.status(429).json({ error: `Wait a few minutes before claiming more XP!` });
+    }
+
+    // ✅ Award XP
+    const newXp = (userData.xp || 0) + 50;
+    await userRef.update({
+        xp: newXp,
+        lastTaskTime: now
+    });
+
+    // ✅ Check Badges
+    const newBadges = await checkAndAwardBadges(userRef, newXp, userData.badges);
+
+    return res.json({ 
+        message: 'Task Verified! +50 XP', 
+        newBadges: newBadges 
+    });
+
+  } catch (err) { return res.status(500).json({ error: err.message }); }
+});
+
+// 4. AI Chatbot (Groq)
 app.post('/chat', async (req, res) => {
     try {
         const { message, userContext } = req.body;
         const apiKey = process.env.GROQ_API_KEY;
-
-        if (!apiKey) {
-            console.error("GROQ_API_KEY is missing");
-            return res.status(500).json({ reply: "Server Error: API Key missing." });
-        }
-
-        const systemPrompt = `
-            You are 'AcadeX Mentor', an academic assistant for ${userContext.firstName}.
-            Context: Role: ${userContext.role}, Dept: ${userContext.department}.
-            Task: Suggest 3 short tasks (15-30 mins) related to ${userContext.department}.
-            Student says: "${message}". Keep response under 50 words. Be motivating.
-        `;
-
-        // ✅ CALLING GROQ DIRECTLY (Llama-3)
         const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
             method: "POST",
-            headers: {
-                "Authorization": `Bearer ${apiKey}`,
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-                messages: [
-                    { role: "system", content: systemPrompt },
-                    { role: "user", content: message }
-                ],
-                model: "llama-3.3-70b-versatile" 
-            })
+            headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
+            body: JSON.stringify({ messages: [{ role: "system", content: `Mentor for ${userContext.firstName}` }, { role: "user", content: message }], model: "llama3-8b-8192" })
         });
-
         const data = await response.json();
-
-        if (data.error) {
-            console.error("Groq API Error:", JSON.stringify(data.error, null, 2));
-            return res.status(500).json({ reply: "AI Error: " + data.error.message });
-        }
-
-        const text = data.choices?.[0]?.message?.content || "No response.";
-        res.json({ reply: text });
-
-    } catch (error) {
-        console.error("Server Error:", error);
-        res.status(500).json({ reply: "My brain is buffering... (Server Error)" });
-    }
+        res.json({ reply: data.choices?.[0]?.message?.content || "No response." });
+    } catch (error) { res.status(500).json({ reply: "Error." }); }
 });
 
-// Route 4: Submit Application
+// Route 5: Submit Application
 app.post('/submitApplication', async (req, res) => {
   try {
     const { instituteName, contactName, email, phone, message } = req.body;
@@ -201,7 +207,7 @@ app.post('/submitApplication', async (req, res) => {
   } catch (err) { return res.status(500).json({ error: err.message }); }
 });
 
-// Route 5: Delete Users
+// Route 6: Delete Users
 app.post('/deleteUsers', async (req, res) => {
   try {
     const { userIds } = req.body;
@@ -220,7 +226,7 @@ app.post('/deleteUsers', async (req, res) => {
   } catch (err) { return res.status(500).json({ error: err.message }); }
 });
 
-// Route 6: Delete Department
+// Route 7: Delete Department
 app.post('/deleteDepartment', async (req, res) => {
   try {
     const { deptId } = req.body;
@@ -230,7 +236,7 @@ app.post('/deleteDepartment', async (req, res) => {
   } catch (err) { return res.status(500).json({ error: err.message }); }
 });
 
-// Route 7: Generate Career Roadmap
+// Route 8: Generate Career Roadmap
 app.post('/generateRoadmap', async (req, res) => {
     try {
         const { goal, department } = req.body;
@@ -279,7 +285,7 @@ app.post('/generateRoadmap', async (req, res) => {
     }
 });
 
-// Route 8: Complete Task (+50 XP) with Anti-Spam
+// Route 9: Complete Task (+50 XP) with Anti-Spam
 app.post('/completeTask', async (req, res) => {
   try {
     const { uid, taskSummary } = req.body; // We now accept a summary too
