@@ -329,10 +329,10 @@ app.post('/endSession', async (req, res) => {
 
     if (!sessionSnap.exists) return res.status(404).json({ error: "Session not found" });
     
-    // Only increment if it was active
     if (sessionSnap.data().isActive) {
         await sessionRef.update({ isActive: false });
         
+        // ✅ Increment Total Classes for Department
         const { instituteId, department } = sessionSnap.data();
         if (instituteId && department) {
             const statsRef = admin.firestore().collection('department_stats').doc(`${instituteId}_${department}`);
