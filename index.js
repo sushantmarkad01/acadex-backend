@@ -172,25 +172,54 @@ app.post('/chat', async (req, res) => {
         const apiKey = process.env.GROQ_API_KEY;
 
         if (!apiKey) {
-            console.error("GROQ_API_KEY is missing");
+            console.error("GROQ_API_KEY missing");
             return res.status(500).json({ reply: "Server Error: API Key missing." });
         }
 
+        // 🔥 UPGRADED PROMPT
         const systemPrompt = `
-            You are 'AcadeX Mentor', for ${userContext.firstName}.
-            Dept: ${userContext.department}.
-            Suggest 3 short tasks (15-30 mins).
-            Student says: "${message}". Keep response under 50 words. Be motivating.
+            You are 'AcadeX Coach', a mentor for ${userContext.firstName}.
+            Profile: ${userContext.department} student. Goal: ${userContext.careerGoal}.
+            
+            Your Goal: Provide a specific "Micro-Mission" to fill their free time.
+            
+            RESPONSE FORMAT (Strictly follow this):
+            1. 🎯 **The Mission:** [Cool Task Name]
+            2. 💡 **Why:** [1 sentence value prop]
+            3. 🚀 **Steps:** [3 bullet points]
+            4. 🔗 **Resources:** - [Watch Video](https://www.youtube.com/results?search_query=${userContext.department}+${message}+tutorial)
+               - [Read Guide](https://www.google.com/search?q=${userContext.department}+${message}+guide)
+            
+            Note: For the "Resources" section, actually generate smart search URLs based on the task topic.
+            Keep it encouraging and under 150 words.
         `;
 
         const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
             method: "POST",
-            headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
+            headers: {
+                "Authorization": `Bearer ${apiKey}`,
+                "Content-Type": "application/json"
+            },
             body: JSON.stringify({
-                messages: [{ role: "system", content: systemPrompt }, { role: "user", content: message }],
+                messages: [
+                    { role: "system", content: systemPrompt },
+                    { role: "user", content: message }
+                ],
                 model: "llama-3.3-70b-versatile"
             })
         });
+
+        const data = await response.json();
+        if (data.error) return res.status(500).json({ reply: "AI Error: " + data.error.message });
+
+        const text = data.choices?.[0]?.message?.content || "No response.";
+        res.json({ reply: text });
+
+    } catch (error) {
+        console.error("AI Error:", error);
+        res.status(500).json({ reply: "Brain buffering..." });
+    }
+});
 
         const data = await response.json();
         if (data.error) return res.status(500).json({ reply: "AI Error: " + data.error.message });
