@@ -320,5 +320,33 @@ app.post('/actionLeave', async (req, res) => {
   } catch (err) { return res.status(500).json({ error: err.message }); }
 });
 
+// 12. End Session & Update Stats (NEW)
+app.post('/endSession', async (req, res) => {
+  try {
+    const { sessionId } = req.body;
+    const sessionRef = admin.firestore().collection('live_sessions').doc(sessionId);
+    const sessionSnap = await sessionRef.get();
+
+    if (!sessionSnap.exists) return res.status(404).json({ error: "Session not found" });
+    
+    // Only increment if it was active
+    if (sessionSnap.data().isActive) {
+        await sessionRef.update({ isActive: false });
+        
+        const { instituteId, department } = sessionSnap.data();
+        if (instituteId && department) {
+            const statsRef = admin.firestore().collection('department_stats').doc(`${instituteId}_${department}`);
+            await statsRef.set({
+                totalClasses: admin.firestore.FieldValue.increment(1),
+                instituteId,
+                department
+            }, { merge: true });
+        }
+    }
+
+    return res.json({ message: "Session Ended." });
+  } catch (err) { return res.status(500).json({ error: err.message }); }
+});
+
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => console.log(`Backend running on port ${PORT}`));
