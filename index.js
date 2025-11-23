@@ -296,5 +296,29 @@ app.post('/submitStudentRequest', async (req, res) => {
     } catch (err) { return res.status(500).json({ error: err.message }); }
 });
 
+// 12. Request Leave (NEW)
+app.post('/requestLeave', async (req, res) => {
+  try {
+    const { uid, name, rollNo, department, reason, fromDate, toDate, instituteId } = req.body;
+    if (!uid || !reason || !fromDate) return res.status(400).json({ error: "Missing fields" });
+
+    await admin.firestore().collection('leave_requests').add({
+      studentId: uid, studentName: name, rollNo, department, reason, fromDate, toDate, instituteId,
+      status: 'pending',
+      createdAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+    return res.json({ message: 'Leave request sent to HOD.' });
+  } catch (err) { return res.status(500).json({ error: err.message }); }
+});
+
+// 13. Action Leave (Approve/Reject) (NEW)
+app.post('/actionLeave', async (req, res) => {
+  try {
+    const { leaveId, status } = req.body; // status: 'approved' | 'rejected'
+    await admin.firestore().collection('leave_requests').doc(leaveId).update({ status });
+    return res.json({ message: `Leave request ${status}.` });
+  } catch (err) { return res.status(500).json({ error: err.message }); }
+});
+
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => console.log(`Backend running on port ${PORT}`));
