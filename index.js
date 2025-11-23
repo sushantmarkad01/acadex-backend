@@ -43,6 +43,7 @@ function getDistance(lat1, lon1, lat2, lon2) {
   return R * c;
 }
 
+// --- BADGE LOGIC ---
 const BADGE_RULES = [
     { id: 'novice', threshold: 100 },
     { id: 'enthusiast', threshold: 500 },
@@ -78,7 +79,7 @@ app.post('/createUser', async (req, res) => {
     const userDoc = { 
         uid: userRecord.uid, email, role, firstName, lastName, instituteId, instituteName, 
         department: department || null, subject: subject || null, rollNo: rollNo || null, qualification: qualification || null,
-        xp: 0, badges: [], attendanceCount: 0, 
+        xp: 0, badges: [], 
         createdAt: admin.firestore.FieldValue.serverTimestamp(), ...extras 
     };
     await admin.firestore().collection('users').doc(userRecord.uid).set(userDoc);
@@ -109,56 +110,217 @@ app.post('/markAttendance', async (req, res) => {
 
     const userRef = admin.firestore().collection('users').doc(studentUid);
     const userSnap = await userRef.get();
-    
     const attRef = admin.firestore().collection('attendance').doc(`${realSessionId}_${studentUid}`);
     if ((await attRef.get()).exists) return res.json({ message: 'Already marked!' });
 
     await attRef.set({
       sessionId: realSessionId, subject: sessionSnap.data().subject, studentId: studentUid, 
       firstName: userSnap.data().firstName, lastName: userSnap.data().lastName, rollNo: userSnap.data().rollNo, 
-      instituteId: sessionSnap.data().instituteId, // ✅ Added InstituteID for queries
       timestamp: admin.firestore.FieldValue.serverTimestamp(), status: 'Present'
     });
 
     const newXp = (userSnap.data().xp || 0) + 10;
-    await userRef.update({ 
-        xp: newXp,
-        attendanceCount: admin.firestore.FieldValue.increment(1)
-    });
+    await userRef.update({ xp: newXp });
     await checkAndAwardBadges(userRef, newXp, userSnap.data().badges);
 
     return res.json({ message: 'Attendance Marked! +10 XP' });
   } catch (err) { return res.status(500).json({ error: err.message }); }
 });
 
-// 3. AI Chatbot
+// ✅ 3. AI Chatbot (The "Super Mentor")
 app.post('/chat', async (req, res) => {
     try {
         const { message, userContext } = req.body;
         const apiKey = process.env.GROQ_API_KEY;
+
         if (!apiKey) return res.status(500).json({ reply: "Server Error: API Key missing." });
 
-        const systemPrompt = `You are 'AcadeX Coach', a mentor for ${userContext.firstName}. Goal: ${userContext.careerGoal}. Format: Markdown.`;
+        // 🔥 SUPER SMART SYSTEM PROMPT
+        const systemPrompt = `
+            You are 'AcadeX Coach', a personal mentor for ${userContext.firstName}.
+            Profile: ${userContext.department} student. Goal: ${userContext.careerGoal}.
+            
+            Your Intelligence:
+            1. If the user asks for a "Quiz" or "Test", generate 3 MCQs.
+            2. If the user asks for "Notes" or "Explain", provide a structured summary.
+            3. If the user says "Go" or "Start", give them a "Micro-Mission".
+            
+            FORMATTING RULES:
+            - Use Markdown (**bold**, *italic*).
+            - For Resources, provide clickable URLs: https://www.youtube.com/results?search_query=TOPIC
+            - Keep it friendly and motivating.
+        `;
+
         const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-            method: "POST", headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
-            body: JSON.stringify({ messages: [{ role: "system", content: systemPrompt }, { role: "user", content: message }], model: "llama-3.3-70b-versatile" })
+            method: "POST",
+            headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
+            body: JSON.stringify({
+                messages: [{ role: "system", content: systemPrompt }, { role: "user", content: message }],
+                model: "llama-3.3-70b-versatile"
+            })
         });
+
         const data = await response.json();
+        if (data.error) return res.status(500).json({ reply: "AI Error: " + data.error.message });
+
         res.json({ reply: data.choices?.[0]?.message?.content || "No response." });
-    } catch (error) { res.status(500).json({ reply: "Brain buffering..." }); }
+
+    } catch (error) {
+        res.status(500).json({ reply: "Brain buffering..." });
+    }
 });
 
-// 4-11. (Keep submitApplication, deleteUsers, deleteDepartment, completeTask, generateRoadmap, requestLeave, actionLeave, submitStudentRequest - Same as previous)
-app.post('/submitApplication', async (req, res) => { /* ... */ });
-app.post('/deleteUsers', async (req, res) => { /* ... */ });
-app.post('/deleteDepartment', async (req, res) => { /* ... */ });
-app.post('/completeTask', async (req, res) => { /* ... */ });
-app.post('/generateRoadmap', async (req, res) => { /* ... */ });
-app.post('/submitStudentRequest', async (req, res) => { /* ... */ });
-app.post('/requestLeave', async (req, res) => { /* ... */ });
-app.post('/actionLeave', async (req, res) => { /* ... */ });
+// ✅ 4. Generate Notes Route (NEW)
+app.post('/generateNotes', async (req, res) => {
+  try {
+    const { topic, department, level } = req.body;
+    const apiKey = process.env.GROQ_API_KEY;
+    
+    const systemPrompt = `Create structured study notes for a ${department} student on: ${topic}. Level: ${level}. Use Markdown. Include: Summary, Key Points, Example.`;
+    
+    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ messages: [{ role: "system", content: systemPrompt }], model: "llama-3.3-70b-versatile" })
+    });
+    const data = await response.json();
+    res.json({ notes: data.choices?.[0]?.message?.content || "Failed." });
+  } catch (err) { res.status(500).json({ error: 'Failed.' }); }
+});
 
-// 12. End Session & Update Stats
+// ✅ 5. Generate MCQs Route (NEW)
+app.post('/generateMCQs', async (req, res) => {
+  try {
+    const { topic, count, department } = req.body;
+    const apiKey = process.env.GROQ_API_KEY;
+
+    const systemPrompt = `Create ${count} MCQs on "${topic}" for ${department} students. Output strict JSON format: { "mcqs": [{ "q": "...", "options": ["A", "B", "C", "D"], "answerIndex": 0, "explanation": "..." }] }`;
+
+    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ messages: [{ role: "system", content: systemPrompt }], model: "llama-3.3-70b-versatile", response_format: { type: "json_object" } })
+    });
+    const data = await response.json();
+    const json = JSON.parse(data.choices[0].message.content);
+    res.json(json);
+  } catch (err) { res.status(500).json({ error: 'Failed.' }); }
+});
+
+// 6. Complete Task
+app.post('/completeTask', async (req, res) => {
+  try {
+    const { uid } = req.body;
+    if (!uid) return res.status(400).json({ error: 'UID missing' });
+    const userRef = admin.firestore().collection('users').doc(uid);
+    const userSnap = await userRef.get();
+    const userData = userSnap.data();
+    const now = admin.firestore.Timestamp.now();
+    const lastTime = userData.lastTaskTime;
+    if (lastTime && (now.toMillis() - lastTime.toMillis()) / (1000 * 60) < 15) return res.status(429).json({ error: `Wait a few minutes!` });
+    const newXp = (userData.xp || 0) + 50;
+    await userRef.update({ xp: newXp, lastTaskTime: now });
+    const newBadges = await checkAndAwardBadges(userRef, newXp, userData.badges);
+    return res.json({ message: 'Task Verified! +50 XP', newBadges });
+  } catch (err) { return res.status(500).json({ error: err.message }); }
+});
+
+// 7. Generate Roadmap
+app.post('/generateRoadmap', async (req, res) => {
+    try {
+        const { goal, department } = req.body;
+        const apiKey = process.env.GROQ_API_KEY;
+        const systemPrompt = `Create 4-Week Roadmap for ${department} student to become "${goal}". Output JSON: { "weeks": [{ "week": 1, "theme": "...", "topics": ["..."] }] }`;
+        const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+            method: "POST", headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
+            body: JSON.stringify({ messages: [{ role: "system", content: systemPrompt }], model: "llama-3.3-70b-versatile", response_format: { type: "json_object" } })
+        });
+        const data = await response.json();
+        const roadmapJSON = JSON.parse(data.choices[0].message.content);
+        res.json({ roadmap: roadmapJSON });
+    } catch (error) { res.status(500).json({ error: "Failed" }); }
+});
+
+// 8. Submit Application
+app.post('/submitApplication', async (req, res) => {
+  try {
+    const { instituteName, contactName, email, phone, message } = req.body;
+    await admin.firestore().collection('applications').add({ instituteName, contactName, email, phone, message, status: 'pending', submittedAt: admin.firestore.FieldValue.serverTimestamp() });
+    return res.json({ message: 'Success' });
+  } catch (err) { return res.status(500).json({ error: err.message }); }
+});
+
+// 9. Delete Users
+app.post('/deleteUsers', async (req, res) => {
+  try {
+    const { userIds } = req.body;
+    try { await admin.auth().deleteUsers(userIds); } catch (authErr) { console.error(authErr); }
+    const batch = admin.firestore().batch();
+    userIds.forEach((uid) => { batch.delete(admin.firestore().collection('users').doc(uid)); });
+    await batch.commit();
+    return res.json({ message: `Deleted ${userIds.length} users.` });
+  } catch (err) { return res.status(500).json({ error: err.message }); }
+});
+
+// 10. Delete Department
+app.post('/deleteDepartment', async (req, res) => {
+  try {
+    const { deptId } = req.body;
+    await admin.firestore().collection('departments').doc(deptId).delete();
+    return res.json({ message: 'Deleted.' });
+  } catch (err) { return res.status(500).json({ error: err.message }); }
+});
+
+// 11. Submit Student Request
+app.post('/submitStudentRequest', async (req, res) => {
+    try {
+        const { firstName, lastName, email, rollNo, department, year, semester, collegeId, password, instituteId, instituteName } = req.body;
+        if (!instituteId || !email || !rollNo || !collegeId) return res.status(400).json({ error: "Missing fields" });
+
+        const usersRef = admin.firestore().collection('users');
+        const requestsRef = admin.firestore().collection('student_requests');
+
+        // Check Duplicates
+        const colIdCheck1 = await usersRef.where('instituteId', '==', instituteId).where('collegeId', '==', collegeId).get();
+        if (!colIdCheck1.empty) return res.status(400).json({ error: `College ID "${collegeId}" is already registered.` });
+        const colIdCheck2 = await requestsRef.where('instituteId', '==', instituteId).where('collegeId', '==', collegeId).get();
+        if (!colIdCheck2.empty) return res.status(400).json({ error: `Application with College ID "${collegeId}" is already pending.` });
+
+        const rollCheck1 = await usersRef.where('instituteId', '==', instituteId).where('department', '==', department).where('rollNo', '==', rollNo).get();
+        if (!rollCheck1.empty) return res.status(400).json({ error: `Roll No "${rollNo}" already exists in ${department}.` });
+        const rollCheck2 = await requestsRef.where('instituteId', '==', instituteId).where('department', '==', department).where('rollNo', '==', rollNo).get();
+        if (!rollCheck2.empty) return res.status(400).json({ error: `Roll No "${rollNo}" is already requested in ${department}.` });
+
+        await requestsRef.add({ firstName, lastName, email, rollNo, department, year, semester, collegeId, password, instituteId, instituteName, status: 'pending', createdAt: admin.firestore.FieldValue.serverTimestamp() });
+        return res.json({ message: 'Success' });
+    } catch (err) { return res.status(500).json({ error: err.message }); }
+});
+
+// 12. Request Leave (NEW)
+app.post('/requestLeave', async (req, res) => {
+  try {
+    const { uid, name, rollNo, department, reason, fromDate, toDate, instituteId } = req.body;
+    if (!uid || !reason || !fromDate) return res.status(400).json({ error: "Missing fields" });
+
+    await admin.firestore().collection('leave_requests').add({
+      studentId: uid, studentName: name, rollNo, department, reason, fromDate, toDate, instituteId,
+      status: 'pending',
+      createdAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+    return res.json({ message: 'Leave request sent to HOD.' });
+  } catch (err) { return res.status(500).json({ error: err.message }); }
+});
+
+// 13. Action Leave (Approve/Reject) (NEW)
+app.post('/actionLeave', async (req, res) => {
+  try {
+    const { leaveId, status } = req.body; // status: 'approved' | 'rejected'
+    await admin.firestore().collection('leave_requests').doc(leaveId).update({ status });
+    return res.json({ message: `Leave request ${status}.` });
+  } catch (err) { return res.status(500).json({ error: err.message }); }
+});
+
+// 14. End Session & Update Stats
 app.post('/endSession', async (req, res) => {
   try {
     const { sessionId } = req.body;
@@ -170,7 +332,7 @@ app.post('/endSession', async (req, res) => {
         await sessionRef.update({ isActive: false });
         const { instituteId, department } = sessionSnap.data();
         if (instituteId && department) {
-            const statsRef = admin.firestore().collection('department_stats').doc(`${instituteId}_${department}`);
+            const statsRef = admin.firestore().collection('department_stats').doc(${instituteId}_${department});
             await statsRef.set({
                 totalClasses: admin.firestore.FieldValue.increment(1),
                 instituteId, department
@@ -181,7 +343,7 @@ app.post('/endSession', async (req, res) => {
   } catch (err) { return res.status(500).json({ error: err.message }); }
 });
 
-// ✅ 13. Get Attendance Analytics (NEW)
+// 15. Get Attendance Analytics (NEW)
 app.post('/getAttendanceAnalytics', async (req, res) => {
     try {
         const { instituteId, subject } = req.body;
