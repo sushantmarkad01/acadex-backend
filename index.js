@@ -113,9 +113,11 @@ app.post('/markAttendance', async (req, res) => {
     const attRef = admin.firestore().collection('attendance').doc(`${realSessionId}_${studentUid}`);
     if ((await attRef.get()).exists) return res.json({ message: 'Already marked!' });
 
+    // FIX: Added instituteId here so analytics route works
     await attRef.set({
       sessionId: realSessionId, subject: sessionSnap.data().subject, studentId: studentUid, 
       firstName: userSnap.data().firstName, lastName: userSnap.data().lastName, rollNo: userSnap.data().rollNo, 
+      instituteId: userSnap.data().instituteId, // <--- ADDED THIS
       timestamp: admin.firestore.FieldValue.serverTimestamp(), status: 'Present'
     });
 
@@ -127,7 +129,7 @@ app.post('/markAttendance', async (req, res) => {
   } catch (err) { return res.status(500).json({ error: err.message }); }
 });
 
-// ✅ 3. AI Chatbot (The "Super Mentor")
+// 3. AI Chatbot
 app.post('/chat', async (req, res) => {
     try {
         const { message, userContext } = req.body;
@@ -135,7 +137,6 @@ app.post('/chat', async (req, res) => {
 
         if (!apiKey) return res.status(500).json({ reply: "Server Error: API Key missing." });
 
-        // 🔥 SUPER SMART SYSTEM PROMPT
         const systemPrompt = `
             You are 'AcadeX Coach', a personal mentor for ${userContext.firstName}.
             Profile: ${userContext.department} student. Goal: ${userContext.careerGoal}.
@@ -170,7 +171,7 @@ app.post('/chat', async (req, res) => {
     }
 });
 
-// ✅ 4. Generate Notes Route (NEW)
+// 4. Generate Notes
 app.post('/generateNotes', async (req, res) => {
   try {
     const { topic, department, level } = req.body;
@@ -188,7 +189,7 @@ app.post('/generateNotes', async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Failed.' }); }
 });
 
-// ✅ 5. Generate MCQs Route (NEW)
+// 5. Generate MCQs
 app.post('/generateMCQs', async (req, res) => {
   try {
     const { topic, count, department } = req.body;
@@ -202,7 +203,11 @@ app.post('/generateMCQs', async (req, res) => {
       body: JSON.stringify({ messages: [{ role: "system", content: systemPrompt }], model: "llama-3.3-70b-versatile", response_format: { type: "json_object" } })
     });
     const data = await response.json();
-    const json = JSON.parse(data.choices[0].message.content);
+    
+    // FIX: Clean up markdown JSON blocks before parsing to prevent crash
+    const cleanJson = data.choices[0].message.content.replace(/```json|```/g, '').trim();
+    const json = JSON.parse(cleanJson);
+    
     res.json(json);
   } catch (err) { res.status(500).json({ error: 'Failed.' }); }
 });
@@ -236,7 +241,11 @@ app.post('/generateRoadmap', async (req, res) => {
             body: JSON.stringify({ messages: [{ role: "system", content: systemPrompt }], model: "llama-3.3-70b-versatile", response_format: { type: "json_object" } })
         });
         const data = await response.json();
-        const roadmapJSON = JSON.parse(data.choices[0].message.content);
+        
+        // FIX: Clean up markdown JSON blocks before parsing
+        const cleanJson = data.choices[0].message.content.replace(/```json|```/g, '').trim();
+        const roadmapJSON = JSON.parse(cleanJson);
+        
         res.json({ roadmap: roadmapJSON });
     } catch (error) { res.status(500).json({ error: "Failed" }); }
 });
@@ -296,7 +305,7 @@ app.post('/submitStudentRequest', async (req, res) => {
     } catch (err) { return res.status(500).json({ error: err.message }); }
 });
 
-// 12. Request Leave (NEW)
+// 12. Request Leave
 app.post('/requestLeave', async (req, res) => {
   try {
     const { uid, name, rollNo, department, reason, fromDate, toDate, instituteId } = req.body;
@@ -311,7 +320,7 @@ app.post('/requestLeave', async (req, res) => {
   } catch (err) { return res.status(500).json({ error: err.message }); }
 });
 
-// 13. Action Leave (Approve/Reject) (NEW)
+// 13. Action Leave
 app.post('/actionLeave', async (req, res) => {
   try {
     const { leaveId, status } = req.body; // status: 'approved' | 'rejected'
@@ -332,7 +341,8 @@ app.post('/endSession', async (req, res) => {
         await sessionRef.update({ isActive: false });
         const { instituteId, department } = sessionSnap.data();
         if (instituteId && department) {
-            const statsRef = admin.firestore().collection('department_stats').doc(${instituteId}_${department});
+            // FIX: Added backticks below
+            const statsRef = admin.firestore().collection('department_stats').doc(`${instituteId}_${department}`);
             await statsRef.set({
                 totalClasses: admin.firestore.FieldValue.increment(1),
                 instituteId, department
@@ -343,7 +353,7 @@ app.post('/endSession', async (req, res) => {
   } catch (err) { return res.status(500).json({ error: err.message }); }
 });
 
-// 15. Get Attendance Analytics (NEW)
+// 15. Get Attendance Analytics
 app.post('/getAttendanceAnalytics', async (req, res) => {
     try {
         const { instituteId, subject } = req.body;
@@ -373,7 +383,6 @@ app.post('/getAttendanceAnalytics', async (req, res) => {
         // Format for Recharts
         const chartData = Object.keys(counts).map(key => ({ name: key, present: counts[key] }));
         
-        // Sort by day order if needed, or just return list
         return res.json({ chartData });
 
     } catch (err) {
