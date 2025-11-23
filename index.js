@@ -16,6 +16,7 @@ function initFirebaseAdmin() {
         ? JSON.parse(Buffer.from(svcEnv, 'base64').toString('utf8'))
         : JSON.parse(svcEnv);
       admin.initializeApp({ credential: admin.credential.cert(svcJson) });
+      console.log("Firebase Admin initialized.");
       return;
     } catch (err) { console.error(err); process.exit(1); }
   }
@@ -109,7 +110,6 @@ app.post('/markAttendance', async (req, res) => {
 
     const userRef = admin.firestore().collection('users').doc(studentUid);
     const userSnap = await userRef.get();
-    
     const attRef = admin.firestore().collection('attendance').doc(`${realSessionId}_${studentUid}`);
     if ((await attRef.get()).exists) return res.json({ message: 'Already marked!' });
 
@@ -127,49 +127,35 @@ app.post('/markAttendance', async (req, res) => {
   } catch (err) { return res.status(500).json({ error: err.message }); }
 });
 
-// ✅ 3. AI Chatbot (SMART CONVERSATION + LINKS)
+// ✅ 3. AI Chatbot (The "Super Mentor")
 app.post('/chat', async (req, res) => {
     try {
-        const { message, userContext, history = [] } = req.body; // Get History
+        const { message, userContext } = req.body;
         const apiKey = process.env.GROQ_API_KEY;
 
         if (!apiKey) return res.status(500).json({ reply: "Server Error: API Key missing." });
 
+        // 🔥 SUPER SMART SYSTEM PROMPT
         const systemPrompt = `
-            You are 'AcadeX Coach', a mentor for ${userContext.firstName} (${userContext.department}).
-            Goal: ${userContext.careerGoal}.
+            You are 'AcadeX Coach', a personal mentor for ${userContext.firstName}.
+            Profile: ${userContext.department} student. Goal: ${userContext.careerGoal}.
             
-            BEHAVIOR:
-            1. If the user says "Go" or "Start", ASK THEM: "What specific topic do you want to master today?" (Do not give tasks yet).
-            2. If the user gives a topic, generate a "Micro-Mission".
+            Your Intelligence:
+            1. If the user asks for a "Quiz" or "Test", generate 3 MCQs.
+            2. If the user asks for "Notes" or "Explain", provide a structured summary.
+            3. If the user says "Go" or "Start", give them a "Micro-Mission".
             
-            MISSION FORMAT:
-            **🎯 Mission:** [Name]
-            **💡 Why:** [1 sentence]
-            **🚀 Steps:**
-            1. [Step 1]
-            2. [Step 2]
-            
-            **🔗 Resources:**
-            (Provide ONLY raw URLs. Do NOT use markdown links like [text](url).)
-            - https://www.youtube.com/results?search_query=${userContext.department}+[TOPIC]
-            - https://www.google.com/search?q=${userContext.department}+[TOPIC]+guide
-            
-            Keep it under 150 words. Use bold for headers.
+            FORMATTING RULES:
+            - Use Markdown (**bold**, *italic*).
+            - For Resources, provide clickable URLs: https://www.youtube.com/results?search_query=TOPIC
+            - Keep it friendly and motivating.
         `;
-
-        // Convert history to Groq format
-        const messages = [
-            { role: "system", content: systemPrompt },
-            ...history.map(msg => ({ role: msg.sender === 'user' ? 'user' : 'assistant', content: msg.text })),
-            { role: "user", content: message }
-        ];
 
         const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
             method: "POST",
             headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
             body: JSON.stringify({
-                messages: messages,
+                messages: [{ role: "system", content: systemPrompt }, { role: "user", content: message }],
                 model: "llama-3.3-70b-versatile"
             })
         });
@@ -184,7 +170,44 @@ app.post('/chat', async (req, res) => {
     }
 });
 
-// 4. Complete Task
+// ✅ 4. Generate Notes Route (NEW)
+app.post('/generateNotes', async (req, res) => {
+  try {
+    const { topic, department, level } = req.body;
+    const apiKey = process.env.GROQ_API_KEY;
+    
+    const systemPrompt = `Create structured study notes for a ${department} student on: ${topic}. Level: ${level}. Use Markdown. Include: Summary, Key Points, Example.`;
+    
+    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ messages: [{ role: "system", content: systemPrompt }], model: "llama-3.3-70b-versatile" })
+    });
+    const data = await response.json();
+    res.json({ notes: data.choices?.[0]?.message?.content || "Failed." });
+  } catch (err) { res.status(500).json({ error: 'Failed.' }); }
+});
+
+// ✅ 5. Generate MCQs Route (NEW)
+app.post('/generateMCQs', async (req, res) => {
+  try {
+    const { topic, count, department } = req.body;
+    const apiKey = process.env.GROQ_API_KEY;
+
+    const systemPrompt = `Create ${count} MCQs on "${topic}" for ${department} students. Output strict JSON format: { "mcqs": [{ "q": "...", "options": ["A", "B", "C", "D"], "answerIndex": 0, "explanation": "..." }] }`;
+
+    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ messages: [{ role: "system", content: systemPrompt }], model: "llama-3.3-70b-versatile", response_format: { type: "json_object" } })
+    });
+    const data = await response.json();
+    const json = JSON.parse(data.choices[0].message.content);
+    res.json(json);
+  } catch (err) { res.status(500).json({ error: 'Failed.' }); }
+});
+
+// 6. Complete Task
 app.post('/completeTask', async (req, res) => {
   try {
     const { uid } = req.body;
@@ -202,7 +225,7 @@ app.post('/completeTask', async (req, res) => {
   } catch (err) { return res.status(500).json({ error: err.message }); }
 });
 
-// 5. Generate Roadmap
+// 7. Generate Roadmap
 app.post('/generateRoadmap', async (req, res) => {
     try {
         const { goal, department } = req.body;
@@ -218,7 +241,7 @@ app.post('/generateRoadmap', async (req, res) => {
     } catch (error) { res.status(500).json({ error: "Failed" }); }
 });
 
-// 6. Submit Application
+// 8. Submit Application
 app.post('/submitApplication', async (req, res) => {
   try {
     const { instituteName, contactName, email, phone, message } = req.body;
@@ -227,7 +250,7 @@ app.post('/submitApplication', async (req, res) => {
   } catch (err) { return res.status(500).json({ error: err.message }); }
 });
 
-// 7. Delete Users
+// 9. Delete Users
 app.post('/deleteUsers', async (req, res) => {
   try {
     const { userIds } = req.body;
@@ -239,7 +262,7 @@ app.post('/deleteUsers', async (req, res) => {
   } catch (err) { return res.status(500).json({ error: err.message }); }
 });
 
-// 8. Delete Department
+// 10. Delete Department
 app.post('/deleteDepartment', async (req, res) => {
   try {
     const { deptId } = req.body;
@@ -248,7 +271,7 @@ app.post('/deleteDepartment', async (req, res) => {
   } catch (err) { return res.status(500).json({ error: err.message }); }
 });
 
-// 9. Submit Student Request
+// 11. Submit Student Request
 app.post('/submitStudentRequest', async (req, res) => {
     try {
         const { firstName, lastName, email, rollNo, department, year, semester, collegeId, password, instituteId, instituteName } = req.body;
