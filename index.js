@@ -263,12 +263,35 @@ app.post('/submitApplication', async (req, res) => {
 app.post('/deleteUsers', async (req, res) => {
   try {
     const { userIds } = req.body;
-    try { await admin.auth().deleteUsers(userIds); } catch (authErr) { console.error(authErr); }
+    if (!userIds || userIds.length === 0) return res.status(400).json({ error: 'No users selected' });
+
+    // A. Delete from Firebase Authentication
+    try {
+        const deleteResult = await admin.auth().deleteUsers(userIds);
+        console.log(`Successfully deleted ${deleteResult.successCount} users from Auth.`);
+        if (deleteResult.failureCount > 0) {
+            console.error(`Failed to delete ${deleteResult.failureCount} users from Auth.`);
+            deleteResult.errors.forEach((err) => console.error(err.error.toJSON()));
+        }
+    } catch (authErr) {
+        console.error("Auth Deletion Critical Error:", authErr);
+        // We continue to delete from Firestore even if Auth fails, to clean up the UI
+    }
+
+    // B. Delete from Firestore Database
     const batch = admin.firestore().batch();
-    userIds.forEach((uid) => { batch.delete(admin.firestore().collection('users').doc(uid)); });
+    userIds.forEach((uid) => {
+        const userRef = admin.firestore().collection('users').doc(uid);
+        batch.delete(userRef);
+    });
     await batch.commit();
-    return res.json({ message: `Deleted ${userIds.length} users.` });
-  } catch (err) { return res.status(500).json({ error: err.message }); }
+
+    return res.json({ message: `Processed deletion for ${userIds.length} users.` });
+
+  } catch (err) {
+    console.error("Delete API Error:", err);
+    return res.status(500).json({ error: err.message });
+  }
 });
 
 // 10. Delete Department
