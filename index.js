@@ -422,5 +422,61 @@ app.post('/deleteInstitute', async (req, res) => {
   }
 });
 
+// 17. CHECK STATUS (Public Endpoint)
+app.post('/checkStatus', async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ error: "Email is required" });
+
+    let result = { found: false, message: "No record found." };
+
+    // A. Check Student Requests
+    const studentSnap = await admin.firestore().collection('student_requests')
+      .where('email', '==', email).limit(1).get();
+
+    if (!studentSnap.empty) {
+        const data = studentSnap.docs[0].data();
+        return res.json({ 
+            found: true, 
+            role: 'student',
+            status: data.status, // 'pending', 'approved', 'denied'
+            message: `Student Request Status: ${data.status.toUpperCase()}`
+        });
+    }
+
+    // B. Check Institute Applications
+    const instituteSnap = await admin.firestore().collection('applications')
+      .where('email', '==', email).limit(1).get();
+
+    if (!instituteSnap.empty) {
+        const data = instituteSnap.docs[0].data();
+        return res.json({ 
+            found: true, 
+            role: 'institute',
+            status: data.status, 
+            message: `Institute Application Status: ${data.status.toUpperCase()}`
+        });
+    }
+
+    // C. Check Existing Users (Already Approved)
+    const userSnap = await admin.firestore().collection('users')
+      .where('email', '==', email).limit(1).get();
+
+    if (!userSnap.empty) {
+        return res.json({ 
+            found: true, 
+            status: 'approved', 
+            message: "Account already active. Please Login."
+        });
+    }
+
+    return res.json(result);
+
+  } catch (err) {
+    console.error("Check Status Error:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => console.log(`Backend running on port ${PORT}`));
