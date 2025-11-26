@@ -43,6 +43,36 @@ function getDistance(lat1, lon1, lat2, lon2) {
   return R * c;
 }
 
+// --- NEW HELPER: RECURSIVE DELETE (For Cascading Deletion) ---
+async function deleteCollection(db, collectionPath, batchSize, queryField, queryValue) {
+  const collectionRef = db.collection(collectionPath);
+  const query = collectionRef.where(queryField, '==', queryValue).limit(batchSize);
+
+  return new Promise((resolve, reject) => {
+    deleteQueryBatch(db, query, resolve).catch(reject);
+  });
+}
+
+async function deleteQueryBatch(db, query, resolve) {
+  const snapshot = await query.get();
+
+  const batchSize = snapshot.size;
+  if (batchSize === 0) {
+    resolve();
+    return;
+  }
+
+  const batch = db.batch();
+  snapshot.docs.forEach((doc) => {
+    batch.delete(doc.ref);
+  });
+  await batch.commit();
+
+  process.nextTick(() => {
+    deleteQueryBatch(db, query, resolve);
+  });
+}
+
 // --- BADGE LOGIC ---
 const BADGE_RULES = [
     { id: 'novice', threshold: 100 },
@@ -113,11 +143,10 @@ app.post('/markAttendance', async (req, res) => {
     const attRef = admin.firestore().collection('attendance').doc(`${realSessionId}_${studentUid}`);
     if ((await attRef.get()).exists) return res.json({ message: 'Already marked!' });
 
-    // FIX: Added instituteId here so analytics route works
     await attRef.set({
       sessionId: realSessionId, subject: sessionSnap.data().subject, studentId: studentUid, 
       firstName: userSnap.data().firstName, lastName: userSnap.data().lastName, rollNo: userSnap.data().rollNo, 
-      instituteId: userSnap.data().instituteId, // <--- ADDED THIS
+      instituteId: userSnap.data().instituteId, 
       timestamp: admin.firestore.FieldValue.serverTimestamp(), status: 'Present'
     });
 
@@ -203,8 +232,6 @@ app.post('/generateMCQs', async (req, res) => {
       body: JSON.stringify({ messages: [{ role: "system", content: systemPrompt }], model: "llama-3.3-70b-versatile", response_format: { type: "json_object" } })
     });
     const data = await response.json();
-    
-    // FIX: Clean up markdown JSON blocks before parsing to prevent crash
     const cleanJson = data.choices[0].message.content.replace(/```json|```/g, '').trim();
     const json = JSON.parse(cleanJson);
     
@@ -241,8 +268,6 @@ app.post('/generateRoadmap', async (req, res) => {
             body: JSON.stringify({ messages: [{ role: "system", content: systemPrompt }], model: "llama-3.3-70b-versatile", response_format: { type: "json_object" } })
         });
         const data = await response.json();
-        
-        // FIX: Clean up markdown JSON blocks before parsing
         const cleanJson = data.choices[0].message.content.replace(/```json|```/g, '').trim();
         const roadmapJSON = JSON.parse(cleanJson);
         
@@ -259,26 +284,19 @@ app.post('/submitApplication', async (req, res) => {
   } catch (err) { return res.status(500).json({ error: err.message }); }
 });
 
-// 9. Delete Users
+// 9. Delete Users (Batch)
 app.post('/deleteUsers', async (req, res) => {
   try {
     const { userIds } = req.body;
     if (!userIds || userIds.length === 0) return res.status(400).json({ error: 'No users selected' });
 
-    // A. Delete from Firebase Authentication
     try {
         const deleteResult = await admin.auth().deleteUsers(userIds);
-        console.log(`Successfully deleted ${deleteResult.successCount} users from Auth.`);
         if (deleteResult.failureCount > 0) {
-            console.error(`Failed to delete ${deleteResult.failureCount} users from Auth.`);
             deleteResult.errors.forEach((err) => console.error(err.error.toJSON()));
         }
-    } catch (authErr) {
-        console.error("Auth Deletion Critical Error:", authErr);
-        // We continue to delete from Firestore even if Auth fails, to clean up the UI
-    }
+    } catch (authErr) { console.error("Auth Deletion Critical Error:", authErr); }
 
-    // B. Delete from Firestore Database
     const batch = admin.firestore().batch();
     userIds.forEach((uid) => {
         const userRef = admin.firestore().collection('users').doc(uid);
@@ -286,12 +304,8 @@ app.post('/deleteUsers', async (req, res) => {
     });
     await batch.commit();
 
-    return res.json({ message: `Processed deletion for ${userIds.length} users.` });
-
-  } catch (err) {
-    console.error("Delete API Error:", err);
-    return res.status(500).json({ error: err.message });
-  }
+    return res.json({ message: `Processed deletion.` });
+  } catch (err) { return res.status(500).json({ error: err.message }); }
 });
 
 // 10. Delete Department
@@ -312,7 +326,6 @@ app.post('/submitStudentRequest', async (req, res) => {
         const usersRef = admin.firestore().collection('users');
         const requestsRef = admin.firestore().collection('student_requests');
 
-        // Check Duplicates
         const colIdCheck1 = await usersRef.where('instituteId', '==', instituteId).where('collegeId', '==', collegeId).get();
         if (!colIdCheck1.empty) return res.status(400).json({ error: `College ID "${collegeId}" is already registered.` });
         const colIdCheck2 = await requestsRef.where('instituteId', '==', instituteId).where('collegeId', '==', collegeId).get();
@@ -346,7 +359,7 @@ app.post('/requestLeave', async (req, res) => {
 // 13. Action Leave
 app.post('/actionLeave', async (req, res) => {
   try {
-    const { leaveId, status } = req.body; // status: 'approved' | 'rejected'
+    const { leaveId, status } = req.body; 
     await admin.firestore().collection('leave_requests').doc(leaveId).update({ status });
     return res.json({ message: `Leave request ${status}.` });
   } catch (err) { return res.status(500).json({ error: err.message }); }
@@ -364,7 +377,6 @@ app.post('/endSession', async (req, res) => {
         await sessionRef.update({ isActive: false });
         const { instituteId, department } = sessionSnap.data();
         if (instituteId && department) {
-            // FIX: Added backticks below
             const statsRef = admin.firestore().collection('department_stats').doc(`${instituteId}_${department}`);
             await statsRef.set({
                 totalClasses: admin.firestore.FieldValue.increment(1),
@@ -380,8 +392,6 @@ app.post('/endSession', async (req, res) => {
 app.post('/getAttendanceAnalytics', async (req, res) => {
     try {
         const { instituteId, subject } = req.body;
-        
-        // Calculate date range (Last 7 Days)
         const now = new Date();
         const sevenDaysAgo = new Date();
         sevenDaysAgo.setDate(now.getDate() - 7);
@@ -393,7 +403,6 @@ app.post('/getAttendanceAnalytics', async (req, res) => {
             .where('timestamp', '>=', sevenDaysAgo)
             .get();
 
-        // Group by Day (Mon, Tue, etc.)
         const counts = { 'Mon': 0, 'Tue': 0, 'Wed': 0, 'Thu': 0, 'Fri': 0, 'Sat': 0, 'Sun': 0 };
         const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
@@ -403,15 +412,65 @@ app.post('/getAttendanceAnalytics', async (req, res) => {
             counts[dayName]++;
         });
 
-        // Format for Recharts
         const chartData = Object.keys(counts).map(key => ({ name: key, present: counts[key] }));
-        
         return res.json({ chartData });
-
     } catch (err) {
         console.error("Analytics Error:", err);
         return res.status(500).json({ error: "Failed to fetch analytics" });
     }
+});
+
+// 16. DELETE INSTITUTE (Cascading - Super Admin Only)
+app.post('/deleteInstitute', async (req, res) => {
+  try {
+    const { instituteId } = req.body;
+    if (!instituteId) return res.status(400).json({ error: 'Missing Institute ID' });
+
+    console.log(`Starting Cascading Delete for Institute: ${instituteId}`);
+
+    // A. Find all users (Students, Teachers, Admin, HODs)
+    const usersSnap = await admin.firestore().collection('users')
+      .where('instituteId', '==', instituteId)
+      .get();
+
+    const uidsToDelete = [];
+    usersSnap.forEach(doc => {
+      uidsToDelete.push(doc.id);
+    });
+
+    // B. Delete from Auth (Batched)
+    if (uidsToDelete.length > 0) {
+      const chunks = [];
+      for (let i = 0; i < uidsToDelete.length; i += 1000) {
+         chunks.push(uidsToDelete.slice(i, i + 1000));
+      }
+      for (const chunk of chunks) {
+         try {
+            await admin.auth().deleteUsers(chunk);
+         } catch(e) { console.error("Auth delete error", e); }
+      }
+    }
+
+    // C. Delete Firestore Data (using helper)
+    const db = admin.firestore();
+    await deleteCollection(db, 'users', 500, 'instituteId', instituteId);
+    await deleteCollection(db, 'attendance', 500, 'instituteId', instituteId);
+    await deleteCollection(db, 'announcements', 500, 'instituteId', instituteId);
+    await deleteCollection(db, 'live_sessions', 500, 'instituteId', instituteId);
+    await deleteCollection(db, 'student_requests', 500, 'instituteId', instituteId);
+    await deleteCollection(db, 'leave_requests', 500, 'instituteId', instituteId);
+
+    // D. Delete Institute Doc & Application
+    await db.collection('institutes').doc(instituteId).delete();
+    await db.collection('applications').doc(instituteId).delete();
+
+    console.log("Institute data wiped successfully.");
+    return res.json({ message: 'Institute deleted permanently.' });
+
+  } catch (err) {
+    console.error("Delete Institute Error:", err);
+    return res.status(500).json({ error: err.message });
+  }
 });
 
 const PORT = process.env.PORT || 8080;
