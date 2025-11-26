@@ -1,53 +1,54 @@
 const express = require('express');
 const admin = require('firebase-admin');
 const cors = require('cors');
-const multer = require('multer'); // ✅ Import Multer
+const multer = require('multer'); // ✅ Import Multer for file handling
+const cloudinary = require('cloudinary').v2; // ✅ Import Cloudinary for storage
 require('dotenv').config(); 
 
 const app = express();
 app.use(cors({ origin: true }));
 app.use(express.json());
 
-// --- MULTER CONFIG (Memory Storage for Render) ---
+// --- 1. MULTER CONFIG (Memory Storage) ---
+// Keeps the file in RAM briefly so we can upload it to Cloudinary
 const upload = multer({ 
   storage: multer.memoryStorage(),
-  limits: { fileSize: 5 * 1024 * 1024 } // Limit to 5MB
+  limits: { fileSize: 5 * 1024 * 1024 } // 5MB Limit
 });
 
-// --- CONFIG: FIREBASE ADMIN ---
+// --- 2. CLOUDINARY CONFIG ---
+// Make sure to add these keys to your Render Environment Variables
+cloudinary.config({ 
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME, 
+  api_key: process.env.CLOUDINARY_API_KEY, 
+  api_secret: process.env.CLOUDINARY_API_SECRET 
+});
+
+// --- 3. FIREBASE ADMIN SETUP ---
 function initFirebaseAdmin() {
   const svcEnv = process.env.FIREBASE_SERVICE_ACCOUNT;
-  let credential;
-  
-  // Parse Service Account
   if (svcEnv) {
     try {
       const svcJson = (/^[A-Za-z0-9+/=]+\s*$/.test(svcEnv) && svcEnv.length > 1000)
         ? JSON.parse(Buffer.from(svcEnv, 'base64').toString('utf8'))
         : JSON.parse(svcEnv);
-      credential = admin.credential.cert(svcJson);
-    } catch (err) { console.error(err); process.exit(1); }
-  } else {
-    try {
-      const local = require('./serviceAccountKey.json');
-      credential = admin.credential.cert(local);
+      admin.initializeApp({ credential: admin.credential.cert(svcJson) });
+      console.log("Firebase Admin initialized.");
+      return;
     } catch (err) { console.error(err); process.exit(1); }
   }
-
-  // ✅ INITIALIZE WITH STORAGE BUCKET
-  // Ensure STORAGE_BUCKET is set in Render Env Vars (e.g., "your-project.appspot.com")
-  admin.initializeApp({ 
-    credential,
-    storageBucket: process.env.STORAGE_BUCKET || "acadex-final.appspot.com" 
-  });
-  console.log("Firebase Admin initialized.");
+  try {
+    const local = require('./serviceAccountKey.json');
+    admin.initializeApp({ credential: admin.credential.cert(local) });
+  } catch (err) { console.error(err); process.exit(1); }
 }
 initFirebaseAdmin();
+
+// --- UTILITIES & HELPERS ---
 
 const DEMO_MODE = (process.env.DEMO_MODE || 'true') === 'true';
 const ACCEPTABLE_RADIUS_METERS = Number(process.env.ACCEPTABLE_RADIUS_METERS || 200);
 
-// --- UTILITIES ---
 function getDistance(lat1, lon1, lat2, lon2) {
   const toRad = (x) => (x * Math.PI) / 180;
   const R = 6371000; 
@@ -60,11 +61,24 @@ function getDistance(lat1, lon1, lat2, lon2) {
   return R * c;
 }
 
-// --- NEW HELPER: RECURSIVE DELETE ---
+// Helper: Upload to Cloudinary
+async function uploadToCloudinary(fileBuffer) {
+    return new Promise((resolve, reject) => {
+        const stream = cloudinary.uploader.upload_stream(
+            { folder: "acadex_docs", resource_type: "auto" },
+            (error, result) => {
+                if (error) reject(error);
+                else resolve(result.secure_url);
+            }
+        );
+        stream.end(fileBuffer);
+    });
+}
+
+// Helper: Recursive Delete for Firestore (Batching)
 async function deleteCollection(db, collectionPath, batchSize, queryField, queryValue) {
   const collectionRef = db.collection(collectionPath);
   const query = collectionRef.where(queryField, '==', queryValue).limit(batchSize);
-
   return new Promise((resolve, reject) => {
     deleteQueryBatch(db, query, resolve).catch(reject);
   });
@@ -72,17 +86,16 @@ async function deleteCollection(db, collectionPath, batchSize, queryField, query
 
 async function deleteQueryBatch(db, query, resolve) {
   const snapshot = await query.get();
-  const batchSize = snapshot.size;
-  if (batchSize === 0) { resolve(); return; }
-
+  if (snapshot.size === 0) { resolve(); return; }
+  
   const batch = db.batch();
   snapshot.docs.forEach((doc) => { batch.delete(doc.ref); });
   await batch.commit();
-
+  
   process.nextTick(() => { deleteQueryBatch(db, query, resolve); });
 }
 
-// --- BADGE LOGIC ---
+// Helper: Badge Logic
 const BADGE_RULES = [
     { id: 'novice', threshold: 100 },
     { id: 'enthusiast', threshold: 500 },
@@ -265,40 +278,32 @@ app.post('/generateRoadmap', async (req, res) => {
     } catch (error) { res.status(500).json({ error: "Failed" }); }
 });
 
-// 8. Submit Application (✅ UPDATED: Handles File Upload via Render)
+// 8. Submit Application (✅ HANDLES CLOUDINARY UPLOAD)
 app.post('/submitApplication', upload.single('document'), async (req, res) => {
   try {
     const { instituteName, contactName, email, phone, message } = req.body;
-    const file = req.file; // The uploaded file from Multer
+    const file = req.file; // The uploaded file via Multer
 
     let documentUrl = null;
 
-    // A. Upload to Firebase Storage if file exists
+    // If a file exists, upload to Cloudinary
     if (file) {
-        const bucket = admin.storage().bucket();
-        const fileName = `application_docs/${Date.now()}_${file.originalname}`;
-        const fileUpload = bucket.file(fileName);
-
-        await fileUpload.save(file.buffer, {
-            metadata: { contentType: file.mimetype }
-        });
-
-        // B. Get a Signed URL (Valid for ~100 years)
-        const [url] = await fileUpload.getSignedUrl({
-            action: 'read',
-            expires: '03-01-2500' 
-        });
-        documentUrl = url;
+        try {
+            documentUrl = await uploadToCloudinary(file.buffer);
+        } catch (uploadError) {
+            console.error("Cloudinary Upload Failed:", uploadError);
+            return res.status(500).json({ error: "Document upload failed" });
+        }
     }
 
-    // C. Save Application to Firestore
+    // Save to Firestore
     await admin.firestore().collection('applications').add({
       instituteName,
       contactName,
       email,
       phone: phone || '',
       message: message || '',
-      documentUrl: documentUrl, // ✅ Save the generated URL
+      documentUrl: documentUrl, // Save Cloudinary Link
       status: 'pending',
       submittedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
@@ -311,20 +316,26 @@ app.post('/submitApplication', upload.single('document'), async (req, res) => {
   }
 });
 
-// 9. Delete Users
+// 9. Delete Users (Batch)
 app.post('/deleteUsers', async (req, res) => {
   try {
     const { userIds } = req.body;
     if (!userIds || userIds.length === 0) return res.status(400).json({ error: 'No users selected' });
+
     try {
-        await admin.auth().deleteUsers(userIds);
+        const deleteResult = await admin.auth().deleteUsers(userIds);
+        if (deleteResult.failureCount > 0) {
+            deleteResult.errors.forEach((err) => console.error(err.error.toJSON()));
+        }
     } catch (authErr) { console.error("Auth Deletion Critical Error:", authErr); }
+
     const batch = admin.firestore().batch();
     userIds.forEach((uid) => {
         const userRef = admin.firestore().collection('users').doc(uid);
         batch.delete(userRef);
     });
     await batch.commit();
+
     return res.json({ message: `Processed deletion.` });
   } catch (err) { return res.status(500).json({ error: err.message }); }
 });
@@ -343,9 +354,14 @@ app.post('/submitStudentRequest', async (req, res) => {
     try {
         const { firstName, lastName, email, rollNo, department, year, semester, collegeId, password, instituteId, instituteName } = req.body;
         if (!instituteId || !email || !rollNo || !collegeId) return res.status(400).json({ error: "Missing fields" });
+
         const usersRef = admin.firestore().collection('users');
         const requestsRef = admin.firestore().collection('student_requests');
-        // (Skipped duplicate checks for brevity, include if needed)
+
+        // Basic Duplication Checks
+        const colIdCheck1 = await usersRef.where('instituteId', '==', instituteId).where('collegeId', '==', collegeId).get();
+        if (!colIdCheck1.empty) return res.status(400).json({ error: `College ID "${collegeId}" is already registered.` });
+        
         await requestsRef.add({ firstName, lastName, email, rollNo, department, year, semester, collegeId, password, instituteId, instituteName, status: 'pending', createdAt: admin.firestore.FieldValue.serverTimestamp() });
         return res.json({ message: 'Success' });
     } catch (err) { return res.status(500).json({ error: err.message }); }
@@ -355,9 +371,12 @@ app.post('/submitStudentRequest', async (req, res) => {
 app.post('/requestLeave', async (req, res) => {
   try {
     const { uid, name, rollNo, department, reason, fromDate, toDate, instituteId } = req.body;
+    if (!uid || !reason || !fromDate) return res.status(400).json({ error: "Missing fields" });
+
     await admin.firestore().collection('leave_requests').add({
       studentId: uid, studentName: name, rollNo, department, reason, fromDate, toDate, instituteId,
-      status: 'pending', createdAt: admin.firestore.FieldValue.serverTimestamp()
+      status: 'pending',
+      createdAt: admin.firestore.FieldValue.serverTimestamp()
     });
     return res.json({ message: 'Leave request sent to HOD.' });
   } catch (err) { return res.status(500).json({ error: err.message }); }
@@ -372,61 +391,93 @@ app.post('/actionLeave', async (req, res) => {
   } catch (err) { return res.status(500).json({ error: err.message }); }
 });
 
-// 14. End Session
+// 14. End Session & Update Stats
 app.post('/endSession', async (req, res) => {
   try {
     const { sessionId } = req.body;
     const sessionRef = admin.firestore().collection('live_sessions').doc(sessionId);
     const sessionSnap = await sessionRef.get();
     if (!sessionSnap.exists) return res.status(404).json({ error: "Session not found" });
+    
     if (sessionSnap.data().isActive) {
         await sessionRef.update({ isActive: false });
         const { instituteId, department } = sessionSnap.data();
         if (instituteId && department) {
             const statsRef = admin.firestore().collection('department_stats').doc(`${instituteId}_${department}`);
-            await statsRef.set({ totalClasses: admin.firestore.FieldValue.increment(1), instituteId, department }, { merge: true });
+            await statsRef.set({
+                totalClasses: admin.firestore.FieldValue.increment(1),
+                instituteId, department
+            }, { merge: true });
         }
     }
     return res.json({ message: "Session Ended." });
   } catch (err) { return res.status(500).json({ error: err.message }); }
 });
 
-// 15. Analytics
+// 15. Get Attendance Analytics
 app.post('/getAttendanceAnalytics', async (req, res) => {
     try {
         const { instituteId, subject } = req.body;
         const now = new Date();
         const sevenDaysAgo = new Date();
         sevenDaysAgo.setDate(now.getDate() - 7);
-        const snapshot = await admin.firestore().collection('attendance')
-            .where('instituteId', '==', instituteId).where('subject', '==', subject).where('timestamp', '>=', sevenDaysAgo).get();
+
+        const attRef = admin.firestore().collection('attendance');
+        const snapshot = await attRef
+            .where('instituteId', '==', instituteId)
+            .where('subject', '==', subject)
+            .where('timestamp', '>=', sevenDaysAgo)
+            .get();
+
         const counts = { 'Mon': 0, 'Tue': 0, 'Wed': 0, 'Thu': 0, 'Fri': 0, 'Sat': 0, 'Sun': 0 };
         const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-        snapshot.forEach(doc => { counts[days[doc.data().timestamp.toDate().getDay()]]++; });
+
+        snapshot.forEach(doc => {
+            const date = doc.data().timestamp.toDate();
+            const dayName = days[date.getDay()];
+            counts[dayName]++;
+        });
+
         const chartData = Object.keys(counts).map(key => ({ name: key, present: counts[key] }));
         return res.json({ chartData });
-    } catch (err) { return res.status(500).json({ error: "Failed" }); }
+    } catch (err) {
+        console.error("Analytics Error:", err);
+        return res.status(500).json({ error: "Failed to fetch analytics" });
+    }
 });
 
-// 16. DELETE INSTITUTE (Cascading)
+// 16. DELETE INSTITUTE (Cascading - Super Admin Only)
 app.post('/deleteInstitute', async (req, res) => {
   try {
     const { instituteId } = req.body;
     if (!instituteId) return res.status(400).json({ error: 'Missing Institute ID' });
-    
-    // A. Users
-    const usersSnap = await admin.firestore().collection('users').where('instituteId', '==', instituteId).get();
-    const uids = [];
-    usersSnap.forEach(doc => uids.push(doc.id));
-    
-    // B. Auth Delete
-    if (uids.length > 0) {
+
+    console.log(`Starting Cascading Delete for Institute: ${instituteId}`);
+
+    // A. Find all users (Students, Teachers, Admin, HODs)
+    const usersSnap = await admin.firestore().collection('users')
+      .where('instituteId', '==', instituteId)
+      .get();
+
+    const uidsToDelete = [];
+    usersSnap.forEach(doc => {
+      uidsToDelete.push(doc.id);
+    });
+
+    // B. Delete from Auth (Batched)
+    if (uidsToDelete.length > 0) {
       const chunks = [];
-      for (let i = 0; i < uids.length; i += 1000) chunks.push(uids.slice(i, i + 1000));
-      for (const chunk of chunks) await admin.auth().deleteUsers(chunk).catch(e => console.error(e));
+      for (let i = 0; i < uidsToDelete.length; i += 1000) {
+         chunks.push(uidsToDelete.slice(i, i + 1000));
+      }
+      for (const chunk of chunks) {
+         try {
+            await admin.auth().deleteUsers(chunk);
+         } catch(e) { console.error("Auth delete error", e); }
+      }
     }
 
-    // C. Firestore Delete
+    // C. Delete Firestore Data (using helper)
     const db = admin.firestore();
     await deleteCollection(db, 'users', 500, 'instituteId', instituteId);
     await deleteCollection(db, 'attendance', 500, 'instituteId', instituteId);
@@ -434,11 +485,18 @@ app.post('/deleteInstitute', async (req, res) => {
     await deleteCollection(db, 'live_sessions', 500, 'instituteId', instituteId);
     await deleteCollection(db, 'student_requests', 500, 'instituteId', instituteId);
     await deleteCollection(db, 'leave_requests', 500, 'instituteId', instituteId);
+
+    // D. Delete Institute Doc & Application
     await db.collection('institutes').doc(instituteId).delete();
     await db.collection('applications').doc(instituteId).delete();
 
+    console.log("Institute data wiped successfully.");
     return res.json({ message: 'Institute deleted permanently.' });
-  } catch (err) { return res.status(500).json({ error: err.message }); }
+
+  } catch (err) {
+    console.error("Delete Institute Error:", err);
+    return res.status(500).json({ error: err.message });
+  }
 });
 
 const PORT = process.env.PORT || 8080;
