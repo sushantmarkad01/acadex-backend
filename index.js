@@ -479,36 +479,29 @@ app.post('/checkStatus', async (req, res) => {
 });
 
 
-// 18. Generate Skill-Boost Cards (New)
-app.post('/generateSkillCards', async (req, res) => {
+//
+
+// ... (previous code)
+
+// 19. Generate Full Quiz (10 Questions)
+app.post('/generateQuiz', async (req, res) => {
     try {
         const { department, semester, careerGoal } = req.body;
         const apiKey = process.env.GROQ_API_KEY;
 
         const systemPrompt = `
-            You are an expert academic mentor.
-            Generate 3 "Micro-Learning Cards" for a ${department} student in Semester ${semester} aiming to be a "${careerGoal}".
+            You are a professor creating a quick-fire quiz.
+            Generate 10 Multiple Choice Questions (MCQs) for a ${department} student in Semester ${semester}.
+            Focus on topics relevant to: "${careerGoal}".
             
-            Return ONLY valid JSON in this exact structure:
+            Return STRICT JSON format:
             {
-              "cards": [
+              "questions": [
                 {
-                  "type": "TIP",
-                  "category": "Quick Tech Tip",
-                  "content": "A short, high-impact technical tip (max 2 sentences)."
-                },
-                {
-                  "type": "MCQ",
-                  "category": "Quick Challenge",
-                  "question": "A relevant technical multiple-choice question.",
+                  "question": "Question text here?",
                   "options": ["Option A", "Option B", "Option C", "Option D"],
-                  "correctAnswer": "Option A",
-                  "explanation": "Why it is correct."
-                },
-                {
-                  "type": "SOFT_SKILL",
-                  "category": "Career Wisdom",
-                  "content": "A communication or interview tip."
+                  "answer": "Option A",
+                  "explanation": "Short explanation of why A is correct."
                 }
               ]
             }
@@ -532,8 +525,8 @@ app.post('/generateSkillCards', async (req, res) => {
         res.json(JSON.parse(cleanJson));
 
     } catch (error) {
-        console.error("Skill Card Error:", error);
-        res.status(500).json({ error: "Failed to generate cards." });
+        console.error("Quiz Gen Error:", error);
+        res.status(500).json({ error: "Failed to generate quiz." });
     }
 });
 
