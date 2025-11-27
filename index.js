@@ -478,5 +478,64 @@ app.post('/checkStatus', async (req, res) => {
   }
 });
 
+
+// 18. Generate Skill-Boost Cards (New)
+app.post('/generateSkillCards', async (req, res) => {
+    try {
+        const { department, semester, careerGoal } = req.body;
+        const apiKey = process.env.GROQ_API_KEY;
+
+        const systemPrompt = `
+            You are an expert academic mentor.
+            Generate 3 "Micro-Learning Cards" for a ${department} student in Semester ${semester} aiming to be a "${careerGoal}".
+            
+            Return ONLY valid JSON in this exact structure:
+            {
+              "cards": [
+                {
+                  "type": "TIP",
+                  "category": "Quick Tech Tip",
+                  "content": "A short, high-impact technical tip (max 2 sentences)."
+                },
+                {
+                  "type": "MCQ",
+                  "category": "Quick Challenge",
+                  "question": "A relevant technical multiple-choice question.",
+                  "options": ["Option A", "Option B", "Option C", "Option D"],
+                  "correctAnswer": "Option A",
+                  "explanation": "Why it is correct."
+                },
+                {
+                  "type": "SOFT_SKILL",
+                  "category": "Career Wisdom",
+                  "content": "A communication or interview tip."
+                }
+              ]
+            }
+        `;
+
+        const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+            method: "POST",
+            headers: { 
+                "Authorization": `Bearer ${apiKey}`, 
+                "Content-Type": "application/json" 
+            },
+            body: JSON.stringify({ 
+                messages: [{ role: "system", content: systemPrompt }], 
+                model: "llama-3.3-70b-versatile",
+                response_format: { type: "json_object" } 
+            })
+        });
+
+        const data = await response.json();
+        const cleanJson = data.choices[0].message.content.replace(/```json|```/g, '').trim();
+        res.json(JSON.parse(cleanJson));
+
+    } catch (error) {
+        console.error("Skill Card Error:", error);
+        res.status(500).json({ error: "Failed to generate cards." });
+    }
+});
+
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => console.log(`Backend running on port ${PORT}`));
