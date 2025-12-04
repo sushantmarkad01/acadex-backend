@@ -752,5 +752,37 @@ app.post('/generateQuiz', async (req, res) => {
     }
 });
 
+
+// Route 20: Update Resume & Claim XP
+app.post('/updateResume', async (req, res) => {
+    try {
+        const authHeader = req.headers.authorization || '';
+        const token = authHeader.split('Bearer ')[1];
+        if (!token) return res.status(401).json({ error: 'Missing token' });
+
+        const decoded = await admin.auth().verifyIdToken(token);
+        const uid = decoded.uid;
+        const { resumeData } = req.body; // Expects { skills: [], experience: '', projects: [] }
+
+        if (!resumeData) return res.status(400).json({ error: "No data provided" });
+
+        const userRef = admin.firestore().collection('users').doc(uid);
+
+        // Update User Doc with new Resume Data + Increment XP
+        await userRef.update({
+            resumeData: resumeData,
+            xp: admin.firestore.FieldValue.increment(50) // 🏆 Reward for productivity
+        });
+
+        return res.json({ message: 'Resume updated! +50 XP awarded 🏆' });
+
+    } catch (error) {
+        console.error("Resume Update Error:", error);
+        return res.status(500).json({ error: error.message });
+    }
+});
+
+
+
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => console.log(`Backend running on port ${PORT}`));
