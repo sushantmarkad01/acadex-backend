@@ -339,44 +339,69 @@ app.post('/createUser', async (req, res) => {
   } catch (err) { return res.status(500).json({ error: err.message }); }
 });
 
-// 2. Mark Attendance
+// Route 2: Mark Attendance
 app.post('/markAttendance', async (req, res) => {
   try {
     const authHeader = req.headers.authorization || '';
     const token = authHeader.split('Bearer ')[1];
     if (!token) return res.status(401).json({ error: 'Missing token' });
+
     const decoded = await admin.auth().verifyIdToken(token);
     const studentUid = decoded.uid;
     const { sessionId, studentLocation } = req.body;
+
+    // Dynamic QR Check
     const [realSessionId, timestamp] = sessionId.split('|');
-    
+    if (!realSessionId) return res.status(400).json({ error: 'Invalid QR Code' });
+
+    if (timestamp) {
+        const qrTime = parseInt(timestamp);
+        const timeDiff = (Date.now() - qrTime) / 1000;
+        if (timeDiff > 15) return res.status(400).json({ error: 'QR Code Expired!' });
+    }
+
     const sessionRef = admin.firestore().collection('live_sessions').doc(realSessionId);
     const sessionSnap = await sessionRef.get();
     if (!sessionSnap.exists || !sessionSnap.data().isActive) return res.status(404).json({ error: 'Session not active' });
 
+    const session = sessionSnap.data();
+    
+    // Geo-Location Check
     if (!DEMO_MODE) {
-        const dist = getDistance(sessionSnap.data().location.latitude, sessionSnap.data().location.longitude, studentLocation.latitude, studentLocation.longitude);
-        if (dist > ACCEPTABLE_RADIUS_METERS) return res.status(403).json({ error: `Too far!` });
+        if (!session.location || !studentLocation) return res.status(400).json({ error: 'Location data missing' });
+        const dist = getDistance(session.location.latitude, session.location.longitude, studentLocation.latitude, studentLocation.longitude);
+        if (dist > ACCEPTABLE_RADIUS_METERS) return res.status(403).json({ error: `Too far! You are ${Math.round(dist)}m away.` });
     }
 
-    const userRef = admin.firestore().collection('users').doc(studentUid);
-    const userSnap = await userRef.get();
-    const attRef = admin.firestore().collection('attendance').doc(`${realSessionId}_${studentUid}`);
-    if ((await attRef.get()).exists) return res.json({ message: 'Already marked!' });
+    const userRef = admin.firestore().collection('users').doc(studentUid); // Reference to student
+    const userDoc = await userRef.get();
+    const studentData = userDoc.data();
 
-    await attRef.set({
-      sessionId: realSessionId, subject: sessionSnap.data().subject, studentId: studentUid, 
-      firstName: userSnap.data().firstName, lastName: userSnap.data().lastName, rollNo: userSnap.data().rollNo, 
-      instituteId: userSnap.data().instituteId, 
-      timestamp: admin.firestore.FieldValue.serverTimestamp(), status: 'Present'
+    // 1. Create the "Receipt" (Log Entry)
+    await admin.firestore().collection('attendance').doc(`${realSessionId}_${studentUid}`).set({
+      sessionId: realSessionId,
+      subject: session.subject || 'Class',
+      studentId: studentUid,
+      studentEmail: studentData.email,
+      firstName: studentData.firstName,
+      lastName: studentData.lastName,
+      rollNo: studentData.rollNo,
+      instituteId: studentData.instituteId,
+      timestamp: admin.firestore.FieldValue.serverTimestamp(),
+      status: 'Present'
     });
 
-    const newXp = (userSnap.data().xp || 0) + 10;
-    await userRef.update({ xp: newXp });
-    await checkAndAwardBadges(userRef, newXp, userSnap.data().badges);
+    // 2. ✅ UPDATE THE SCOREBOARD (Increment Count)
+    await userRef.update({
+        attendanceCount: admin.firestore.FieldValue.increment(1)
+    });
 
-    return res.json({ message: 'Attendance Marked! +10 XP' });
-  } catch (err) { return res.status(500).json({ error: err.message }); }
+    return res.json({ message: 'Attendance Marked Successfully!' });
+
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: err.message });
+  }
 });
 
 // 3. AI Chatbot (Groq)
