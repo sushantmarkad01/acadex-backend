@@ -1,10 +1,10 @@
 const express = require('express');
 const admin = require('firebase-admin');
 const cors = require('cors');
-const multer = require('multer'); 
-const cloudinary = require('cloudinary').v2; 
-const rateLimit = require('express-rate-limit'); 
-// ✅ Import Groq Helper
+const multer = require('multer'); // ✅ 1. Import Multer
+const cloudinary = require('cloudinary').v2; // ✅ 2. Import Cloudinary
+const rateLimit = require('express-rate-limit'); // ✅ 3. Import Rate Limiter
+// ✅ 4. Import Groq Helper (Ensure you created lib/groqClient.js)
 const { callGroqAI, computeHash, isUnsafe, MODEL_ID } = require('./lib/groqClient'); 
 require('dotenv').config(); 
 
@@ -13,6 +13,7 @@ app.use(cors({ origin: true }));
 app.use(express.json());
 
 // --- RATE LIMITER CONFIG ---
+// Limit requests to 60 per minute per IP to prevent abuse
 const limiter = rateLimit({
   windowMs: 1 * 60 * 1000, 
   max: 60,
@@ -27,6 +28,7 @@ const upload = multer({
 });
 
 // --- 2. CLOUDINARY CONFIG ---
+// Ensure these are in your Render Environment Variables
 cloudinary.config({ 
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME, 
   api_key: process.env.CLOUDINARY_API_KEY, 
@@ -74,7 +76,7 @@ function getDistance(lat1, lon1, lat2, lon2) {
 async function uploadToCloudinary(fileBuffer) {
     return new Promise((resolve, reject) => {
         const stream = cloudinary.uploader.upload_stream(
-            { folder: "acadex_docs", resource_type: "auto" }, 
+            { folder: "acadex_docs", resource_type: "auto" }, // auto detects PDF/Img
             (error, result) => {
                 if (error) reject(error);
                 else resolve(result.secure_url);
@@ -125,7 +127,7 @@ async function checkAndAwardBadges(userRef, currentXp, currentBadges = []) {
 }
 
 // =======================
-//   ROBUST STUDY ROUTES (The New, Correct Logic)
+//   ROBUST STUDY ROUTES (NEW)
 // =======================
 
 // A. Topic Capture Flow
@@ -177,6 +179,7 @@ app.get('/notes', async (req, res) => {
     }
 
     const topicName = latestTopic.topicName;
+    // Cache Key: Hash of topic + 'notes' + modelVersion
     const cacheKey = computeHash(`${topicName}_notes_${MODEL_ID}`);
 
     // 2. Check Cache
@@ -314,7 +317,7 @@ app.post('/quizAttempt', async (req, res) => {
 });
 
 // =======================
-//   GENERAL ROUTES
+//   LEGACY ROUTES
 // =======================
 
 app.get('/health', (req, res) => res.json({ status: 'ok', demoMode: DEMO_MODE }));
@@ -394,7 +397,38 @@ app.post('/chat', async (req, res) => {
     } catch (error) { res.status(500).json({ reply: "Brain buffering..." }); }
 });
 
-// 4. Complete Task
+// 4. Generate Notes
+app.post('/generateNotes', async (req, res) => {
+  try {
+    const { topic, department, level } = req.body;
+    const apiKey = process.env.GROQ_API_KEY;
+    const systemPrompt = `Create structured notes on: ${topic}. Level: ${level}. Use Markdown.`;
+    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST", headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ messages: [{ role: "system", content: systemPrompt }], model: "llama-3.3-70b-versatile" })
+    });
+    const data = await response.json();
+    res.json({ notes: data.choices?.[0]?.message?.content || "Failed." });
+  } catch (err) { res.status(500).json({ error: 'Failed.' }); }
+});
+
+// 5. Generate MCQs
+app.post('/generateMCQs', async (req, res) => {
+  try {
+    const { topic, count, department } = req.body;
+    const apiKey = process.env.GROQ_API_KEY;
+    const systemPrompt = `Create ${count} MCQs on "${topic}". Output strict JSON format: { "mcqs": [{ "q": "...", "options": ["A", "B", "C", "D"], "answerIndex": 0, "explanation": "..." }] }`;
+    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST", headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ messages: [{ role: "system", content: systemPrompt }], model: "llama-3.3-70b-versatile", response_format: { type: "json_object" } })
+    });
+    const data = await response.json();
+    const cleanJson = data.choices[0].message.content.replace(/```json|```/g, '').trim();
+    res.json(JSON.parse(cleanJson));
+  } catch (err) { res.status(500).json({ error: 'Failed.' }); }
+});
+
+// 6. Complete Task
 app.post('/completeTask', async (req, res) => {
   try {
     const { uid } = req.body;
@@ -412,7 +446,7 @@ app.post('/completeTask', async (req, res) => {
   } catch (err) { return res.status(500).json({ error: err.message }); }
 });
 
-// 5. Generate Roadmap
+// 7. Generate Roadmap
 app.post('/generateRoadmap', async (req, res) => {
     try {
         const { goal, department } = req.body;
@@ -428,7 +462,7 @@ app.post('/generateRoadmap', async (req, res) => {
     } catch (error) { res.status(500).json({ error: "Failed" }); }
 });
 
-// 6. Submit Application
+// 8. Submit Application (✅ HANDLES CLOUDINARY UPLOAD)
 app.post('/submitApplication', upload.single('document'), async (req, res) => {
   try {
     const { instituteName, contactName, email, phone, message } = req.body;
@@ -436,6 +470,7 @@ app.post('/submitApplication', upload.single('document'), async (req, res) => {
 
     let documentUrl = null;
 
+    // If a file exists, upload to Cloudinary
     if (file) {
         try {
             documentUrl = await uploadToCloudinary(file.buffer);
@@ -445,6 +480,7 @@ app.post('/submitApplication', upload.single('document'), async (req, res) => {
         }
     }
 
+    // Save to Firestore
     await admin.firestore().collection('applications').add({
       instituteName,
       contactName,
@@ -464,7 +500,7 @@ app.post('/submitApplication', upload.single('document'), async (req, res) => {
   }
 });
 
-// 7. Delete Users (Batch)
+// 9. Delete Users (Batch)
 app.post('/deleteUsers', async (req, res) => {
   try {
     const { userIds } = req.body;
@@ -477,7 +513,7 @@ app.post('/deleteUsers', async (req, res) => {
   } catch (err) { return res.status(500).json({ error: err.message }); }
 });
 
-// 8. Delete Department
+// 10. Delete Department
 app.post('/deleteDepartment', async (req, res) => {
   try {
     const { deptId } = req.body;
@@ -486,7 +522,7 @@ app.post('/deleteDepartment', async (req, res) => {
   } catch (err) { return res.status(500).json({ error: err.message }); }
 });
 
-// 9. Submit Student Request
+// 11. Submit Student Request
 app.post('/submitStudentRequest', async (req, res) => {
     try {
         const { firstName, lastName, email, rollNo, department, year, semester, collegeId, password, instituteId, instituteName } = req.body;
@@ -496,7 +532,7 @@ app.post('/submitStudentRequest', async (req, res) => {
     } catch (err) { return res.status(500).json({ error: err.message }); }
 });
 
-// 10. Request Leave
+// 12. Request Leave
 app.post('/requestLeave', async (req, res) => {
   try {
     const { uid, name, rollNo, department, reason, fromDate, toDate, instituteId } = req.body;
@@ -508,7 +544,7 @@ app.post('/requestLeave', async (req, res) => {
   } catch (err) { return res.status(500).json({ error: err.message }); }
 });
 
-// 11. Action Leave
+// 13. Action Leave
 app.post('/actionLeave', async (req, res) => {
   try {
     const { leaveId, status } = req.body; 
@@ -517,7 +553,7 @@ app.post('/actionLeave', async (req, res) => {
   } catch (err) { return res.status(500).json({ error: err.message }); }
 });
 
-// 12. End Session
+// 14. End Session
 app.post('/endSession', async (req, res) => {
   try {
     const { sessionId } = req.body;
@@ -536,7 +572,7 @@ app.post('/endSession', async (req, res) => {
   } catch (err) { return res.status(500).json({ error: err.message }); }
 });
 
-// 13. Get Analytics
+// 15. Get Analytics
 app.post('/getAttendanceAnalytics', async (req, res) => {
     try {
         const { instituteId, subject } = req.body;
@@ -552,7 +588,7 @@ app.post('/getAttendanceAnalytics', async (req, res) => {
     } catch (err) { return res.status(500).json({ error: "Failed" }); }
 });
 
-// 14. DELETE INSTITUTE
+// 16. DELETE INSTITUTE (Cascading - Super Admin Only)
 app.post('/deleteInstitute', async (req, res) => {
   try {
     const { instituteId } = req.body;
@@ -588,7 +624,7 @@ app.post('/deleteInstitute', async (req, res) => {
   }
 });
 
-// 15. CHECK STATUS
+// 17. CHECK STATUS (Public Endpoint)
 app.post('/checkStatus', async (req, res) => {
   try {
     const { email } = req.body;
@@ -605,7 +641,7 @@ app.post('/checkStatus', async (req, res) => {
         return res.json({ 
             found: true, 
             role: 'student',
-            status: data.status, 
+            status: data.status, // 'pending', 'approved', 'denied'
             message: `Student Request Status: ${data.status.toUpperCase()}`
         });
     }
@@ -642,6 +678,53 @@ app.post('/checkStatus', async (req, res) => {
     console.error("Check Status Error:", err);
     return res.status(500).json({ error: err.message });
   }
+});
+
+// 19. Generate Full Quiz (Legacy/Specific Endpoint)
+app.post('/generateQuiz', async (req, res) => {
+    try {
+        const { department, semester, careerGoal } = req.body;
+        const apiKey = process.env.GROQ_API_KEY;
+
+        const systemPrompt = `
+            You are a professor creating a quick-fire quiz.
+            Generate 10 Multiple Choice Questions (MCQs) for a ${department} student in Semester ${semester}.
+            Focus on topics relevant to: "${careerGoal}".
+            
+            Return STRICT JSON format:
+            {
+              "questions": [
+                {
+                  "question": "Question text here?",
+                  "options": ["Option A", "Option B", "Option C", "Option D"],
+                  "answer": "Option A",
+                  "explanation": "Short explanation of why A is correct."
+                }
+              ]
+            }
+        `;
+
+        const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+            method: "POST",
+            headers: { 
+                "Authorization": `Bearer ${apiKey}`, 
+                "Content-Type": "application/json" 
+            },
+            body: JSON.stringify({ 
+                messages: [{ role: "system", content: systemPrompt }], 
+                model: "llama-3.3-70b-versatile",
+                response_format: { type: "json_object" } 
+            })
+        });
+
+        const data = await response.json();
+        const cleanJson = data.choices[0].message.content.replace(/```json|```/g, '').trim();
+        res.json(JSON.parse(cleanJson));
+
+    } catch (error) {
+        console.error("Quiz Gen Error:", error);
+        res.status(500).json({ error: "Failed to generate quiz." });
+    }
 });
 
 const PORT = process.env.PORT || 8080;
