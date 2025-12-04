@@ -3,11 +3,23 @@ const admin = require('firebase-admin');
 const cors = require('cors');
 const multer = require('multer'); // ✅ 1. Import Multer
 const cloudinary = require('cloudinary').v2; // ✅ 2. Import Cloudinary
+const rateLimit = require('express-rate-limit'); // ✅ 3. Import Rate Limiter
+// ✅ 4. Import Groq Helper (Ensure you created lib/groqClient.js)
+const { callGroqAI, computeHash, isUnsafe, MODEL_ID } = require('./lib/groqClient'); 
 require('dotenv').config(); 
 
 const app = express();
 app.use(cors({ origin: true }));
 app.use(express.json());
+
+// --- RATE LIMITER CONFIG ---
+// Limit requests to 60 per minute per IP to prevent abuse
+const limiter = rateLimit({
+  windowMs: 1 * 60 * 1000, 
+  max: 60,
+  message: { error: "Too many requests, please try again later." }
+});
+app.use(limiter);
 
 // --- 1. MULTER CONFIG (RAM Storage) ---
 const upload = multer({ 
@@ -115,7 +127,197 @@ async function checkAndAwardBadges(userRef, currentXp, currentBadges = []) {
 }
 
 // =======================
-//        ROUTES
+//   ROBUST STUDY ROUTES (NEW)
+// =======================
+
+// A. Topic Capture Flow
+app.post('/storeTopic', async (req, res) => {
+  try {
+    const { userId, topic } = req.body;
+    if (!userId || !topic) return res.status(400).json({ error: "Missing fields" });
+
+    if (isUnsafe(topic)) return res.status(400).json({ error: "Topic violates safety guidelines." });
+
+    const topicId = computeHash(topic.toLowerCase().trim());
+    const userRef = admin.firestore().collection('users').doc(userId);
+    
+    // Update User's Latest Topic
+    await userRef.update({
+      latestTopic: {
+        topicId,
+        topicName: topic,
+        storedAt: admin.firestore.FieldValue.serverTimestamp()
+      }
+    });
+
+    // Store Topic in Sub-collection History
+    await userRef.collection('topics').doc(topicId).set({
+      topicName: topic,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      source: 'user_input'
+    }, { merge: true });
+
+    res.json({ ok: true, topicId });
+  } catch (err) {
+    console.error("StoreTopic Error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// B. Generate or Return Cached Notes
+app.get('/notes', async (req, res) => {
+  try {
+    const { userId } = req.query;
+    if (!userId) return res.status(400).json({ error: "User ID required" });
+
+    // 1. Get User's Latest Topic
+    const userSnap = await admin.firestore().collection('users').doc(userId).get();
+    const latestTopic = userSnap.data()?.latestTopic;
+
+    if (!latestTopic || !latestTopic.topicName) {
+      return res.status(400).json({ error: "No active topic found. Please set a topic first." });
+    }
+
+    const topicName = latestTopic.topicName;
+    // Cache Key: Hash of topic + 'notes' + modelVersion
+    const cacheKey = computeHash(`${topicName}_notes_${MODEL_ID}`);
+
+    // 2. Check Cache
+    const noteRef = admin.firestore().collection('notes').doc(cacheKey);
+    const noteSnap = await noteRef.get();
+
+    if (noteSnap.exists) {
+      return res.json({ fromCache: true, note: noteSnap.data() });
+    }
+
+    // 3. Generate via Groq
+    const systemPrompt = `You are an educational assistant for students aged 16-22. Produce concise, accurate study notes.`;
+    const userPrompt = `Generate short study notes for the topic: "${topicName}".
+    Constraints:
+    - Length: 200-350 words.
+    - Format: short intro, 3 bullet points (key ideas), 1 worked example, 2 practice questions.
+    - End with one-line summary.
+    Return ONLY the content string.`;
+
+    const generatedContent = await callGroqAI(systemPrompt, userPrompt, false);
+
+    // 4. Save to Firestore
+    const noteData = {
+      topicName,
+      content: generatedContent,
+      generatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      generatedForUserId: userId,
+      prompt: userPrompt,
+      modelVersion: MODEL_ID,
+      hash: cacheKey
+    };
+
+    await noteRef.set(noteData);
+
+    res.json({ fromCache: false, note: noteData });
+
+  } catch (err) {
+    console.error("GetNotes Error:", err);
+    res.status(500).json({ error: "Failed to generate notes." });
+  }
+});
+
+// C. Generate or Return Cached Quiz
+app.get('/quiz', async (req, res) => {
+  try {
+    const { userId, numQuestions = 5, difficulty = 'medium' } = req.query;
+    if (!userId) return res.status(400).json({ error: "User ID required" });
+
+    const userSnap = await admin.firestore().collection('users').doc(userId).get();
+    const latestTopic = userSnap.data()?.latestTopic;
+
+    if (!latestTopic || !latestTopic.topicName) {
+      return res.status(400).json({ error: "No active topic found." });
+    }
+
+    const topicName = latestTopic.topicName;
+    const cacheKey = computeHash(`${topicName}_quiz_${difficulty}_${numQuestions}_${MODEL_ID}`);
+
+    // 2. Check Cache
+    const quizRef = admin.firestore().collection('quizzes').doc(cacheKey);
+    const quizSnap = await quizRef.get();
+
+    if (quizSnap.exists) {
+      return res.json({ fromCache: true, quiz: quizSnap.data() });
+    }
+
+    // 3. Generate via Groq
+    const systemPrompt = `You are a quiz generator. Return valid JSON only.`;
+    const userPrompt = `Create a ${numQuestions}-question quiz for topic: "${topicName}".
+    Constraints:
+    - Difficulty: ${difficulty}.
+    - Format: Multiple-choice (4 options).
+    - JSON Output Structure:
+    {
+      "quizTitle": "...",
+      "questions": [
+        { "question":"...","options":["...","...","...","..."], "correctIndex":0, "explanation":"..." }
+      ]
+    }`;
+
+    const quizJson = await callGroqAI(systemPrompt, userPrompt, true);
+
+    // 4. Save to Firestore
+    const quizData = {
+      topicName,
+      difficulty,
+      questions: quizJson.questions || [],
+      quizTitle: quizJson.quizTitle || `${topicName} Quiz`,
+      generatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      generatedForUserId: userId,
+      prompt: userPrompt,
+      modelVersion: MODEL_ID,
+      hash: cacheKey
+    };
+
+    await quizRef.set(quizData);
+
+    res.json({ fromCache: false, quiz: quizData });
+
+  } catch (err) {
+    console.error("GetQuiz Error:", err);
+    res.status(500).json({ error: "Failed to generate quiz." });
+  }
+});
+
+// D. Quiz Attempt Recording
+app.post('/quizAttempt', async (req, res) => {
+  try {
+    const { userId, quizId, answers, score } = req.body;
+    
+    if (!userId || !quizId) return res.status(400).json({ error: "Invalid data" });
+
+    const attemptData = {
+      quizId,
+      score,
+      answers: answers || [], // [{ questionIndex: 0, selectedIndex: 1, correct: false }]
+      timestamp: admin.firestore.FieldValue.serverTimestamp()
+    };
+
+    const docRef = await admin.firestore().collection('userProgress').doc(userId)
+                  .collection('attempts').add(attemptData);
+
+    // Optional: Update XP if score is good (Simple Gamification)
+    if (score > 60) {
+        const userRef = admin.firestore().collection('users').doc(userId);
+        await userRef.update({ xp: admin.firestore.FieldValue.increment(20) });
+    }
+
+    res.json({ ok: true, attemptId: docRef.id });
+
+  } catch (err) {
+    console.error("QuizAttempt Error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// =======================
+//   LEGACY ROUTES
 // =======================
 
 app.get('/health', (req, res) => res.json({ status: 'ok', demoMode: DEMO_MODE }));
@@ -478,12 +680,7 @@ app.post('/checkStatus', async (req, res) => {
   }
 });
 
-
-//
-
-// ... (previous code)
-
-// 19. Generate Full Quiz (10 Questions)
+// 19. Generate Full Quiz (Legacy/Specific Endpoint)
 app.post('/generateQuiz', async (req, res) => {
     try {
         const { department, semester, careerGoal } = req.body;
