@@ -808,6 +808,109 @@ app.post('/updateResume', async (req, res) => {
     }
 });
 
+// =======================
+//   📝 ASSIGNMENT ROUTES
+// =======================
+
+// 20. Create Assignment (Teacher)
+app.post('/createAssignment', async (req, res) => {
+    try {
+        const { teacherId, teacherName, department, targetYear, title, description, dueDate } = req.body;
+        
+        await admin.firestore().collection('assignments').add({
+            teacherId,
+            teacherName,
+            department,
+            targetYear,
+            title,
+            description,
+            dueDate,
+            createdAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+
+        return res.json({ message: "Assignment created successfully!" });
+    } catch (err) { return res.status(500).json({ error: err.message }); }
+});
+
+// 21. Get Assignments (Student)
+app.post('/getAssignments', async (req, res) => {
+    try {
+        const { department, year } = req.body;
+        // Fetch assignments for student's Dept & Year OR 'All'
+        const q = admin.firestore().collection('assignments')
+            .where('department', '==', department)
+            .where('targetYear', 'in', [year, 'All']);
+            
+        const snapshot = await q.get();
+        const tasks = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        
+        // Sort by Due Date locally (since mixed queries can be tricky in Firestore)
+        tasks.sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate));
+        
+        return res.json({ tasks });
+    } catch (err) { return res.status(500).json({ error: err.message }); }
+});
+
+// 22. Submit Assignment (Student - Upload PDF)
+app.post('/submitAssignment', upload.single('document'), async (req, res) => {
+    try {
+        const { studentId, studentName, rollNo, assignmentId } = req.body;
+        const file = req.file;
+
+        if (!file) return res.status(400).json({ error: "No file uploaded" });
+
+        // Check if already submitted
+        const existing = await admin.firestore().collection('submissions')
+            .where('assignmentId', '==', assignmentId)
+            .where('studentId', '==', studentId).get();
+            
+        if (!existing.empty) return res.status(400).json({ error: "Already submitted!" });
+
+        // Upload to Cloudinary
+        const documentUrl = await uploadToCloudinary(file.buffer);
+
+        await admin.firestore().collection('submissions').add({
+            assignmentId,
+            studentId,
+            studentName,
+            rollNo,
+            documentUrl,
+            status: 'Pending', // Pending, Graded
+            marks: null,
+            submittedAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+
+        return res.json({ message: "Assignment Submitted!" });
+    } catch (err) { return res.status(500).json({ error: err.message }); }
+});
+
+// 23. Get Submissions for a Task (Teacher)
+app.post('/getSubmissions', async (req, res) => {
+    try {
+        const { assignmentId } = req.body;
+        const snapshot = await admin.firestore().collection('submissions')
+            .where('assignmentId', '==', assignmentId).get();
+            
+        const submissions = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        return res.json({ submissions });
+    } catch (err) { return res.status(500).json({ error: err.message }); }
+});
+
+// 24. Grade Submission (Teacher)
+app.post('/gradeSubmission', async (req, res) => {
+    try {
+        const { submissionId, marks, feedback } = req.body;
+        
+        await admin.firestore().collection('submissions').doc(submissionId).update({
+            status: 'Graded',
+            marks,
+            feedback
+        });
+
+        return res.json({ message: "Graded successfully!" });
+    } catch (err) { return res.status(500).json({ error: err.message }); }
+});
+
 
 
 const PORT = process.env.PORT || 8080;
