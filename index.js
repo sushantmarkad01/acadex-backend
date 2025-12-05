@@ -557,16 +557,42 @@ app.post('/submitStudentRequest', async (req, res) => {
     } catch (err) { return res.status(500).json({ error: err.message }); }
 });
 
-// 12. Request Leave
-app.post('/requestLeave', async (req, res) => {
+// 12. Request Leave (✅ UPDATED TO SUPPORT FILE UPLOAD)
+app.post('/requestLeave', upload.single('document'), async (req, res) => {
   try {
     const { uid, name, rollNo, department, reason, fromDate, toDate, instituteId } = req.body;
+    const file = req.file;
+    let documentUrl = null;
+
+    // Upload to Cloudinary if file exists
+    if (file) {
+        try {
+            documentUrl = await uploadToCloudinary(file.buffer);
+        } catch (uploadError) {
+            console.error("Cloudinary Upload Failed:", uploadError);
+            return res.status(500).json({ error: "Document upload failed" });
+        }
+    }
+
     await admin.firestore().collection('leave_requests').add({
-      studentId: uid, studentName: name, rollNo, department, reason, fromDate, toDate, instituteId,
-      status: 'pending', createdAt: admin.firestore.FieldValue.serverTimestamp()
+      studentId: uid, 
+      studentName: name, 
+      rollNo, 
+      department, 
+      reason, 
+      fromDate, 
+      toDate, 
+      instituteId,
+      documentUrl, // ✅ Save the Proof URL
+      status: 'pending', 
+      createdAt: admin.firestore.FieldValue.serverTimestamp()
     });
-    return res.json({ message: 'Leave request sent.' });
-  } catch (err) { return res.status(500).json({ error: err.message }); }
+
+    return res.json({ message: 'Leave request sent successfully!' });
+  } catch (err) { 
+      console.error(err);
+      return res.status(500).json({ error: err.message }); 
+  }
 });
 
 // 13. Action Leave
