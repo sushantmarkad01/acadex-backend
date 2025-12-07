@@ -1,10 +1,9 @@
 const express = require('express');
 const admin = require('firebase-admin');
 const cors = require('cors');
-const multer = require('multer'); // ✅ 1. Import Multer
-const cloudinary = require('cloudinary').v2; // ✅ 2. Import Cloudinary
-const rateLimit = require('express-rate-limit'); // ✅ 3. Import Rate Limiter
-// ✅ 4. Import Groq Helper (Ensure you created lib/groqClient.js)
+const multer = require('multer'); // 1. Import Multer
+const cloudinary = require('cloudinary').v2; //  2. Import Cloudinary
+const rateLimit = require('express-rate-limit'); //  3. Import Rate Limiter
 const { callGroqAI, computeHash, isUnsafe, MODEL_ID } = require('./lib/groqClient'); 
 require('dotenv').config(); 
 
@@ -72,7 +71,7 @@ function getDistance(lat1, lon1, lat2, lon2) {
   return R * c;
 }
 
-// ✅ Helper: Upload to Cloudinary
+// Helper: Upload to Cloudinary
 async function uploadToCloudinary(fileBuffer) {
     return new Promise((resolve, reject) => {
         const stream = cloudinary.uploader.upload_stream(
@@ -86,7 +85,7 @@ async function uploadToCloudinary(fileBuffer) {
     });
 }
 
-// ✅ Helper: Recursive Delete (For cleaning up Institutes)
+// Helper: Recursive Delete (For cleaning up Institutes)
 async function deleteCollection(db, collectionPath, batchSize, queryField, queryValue) {
   const collectionRef = db.collection(collectionPath);
   const query = collectionRef.where(queryField, '==', queryValue).limit(batchSize);
@@ -391,7 +390,7 @@ app.post('/markAttendance', async (req, res) => {
       status: 'Present'
     });
 
-    // 2. ✅ UPDATE THE SCOREBOARD (Increment Count)
+    // 2. UPDATE THE SCOREBOARD (Increment Count)
     await userRef.update({
         attendanceCount: admin.firestore.FieldValue.increment(1)
     });
@@ -487,7 +486,7 @@ app.post('/generateRoadmap', async (req, res) => {
     } catch (error) { res.status(500).json({ error: "Failed" }); }
 });
 
-// 8. Submit Application (✅ HANDLES CLOUDINARY UPLOAD)
+// 8. Submit Application ( HANDLES CLOUDINARY UPLOAD)
 app.post('/submitApplication', upload.single('document'), async (req, res) => {
   try {
     const { instituteName, contactName, email, phone, message } = req.body;
@@ -557,7 +556,7 @@ app.post('/submitStudentRequest', async (req, res) => {
     } catch (err) { return res.status(500).json({ error: err.message }); }
 });
 
-// 12. Request Leave (✅ UPDATED TO SUPPORT FILE UPLOAD)
+// 12. Request Leave ( UPDATED TO SUPPORT FILE UPLOAD)
 app.post('/requestLeave', upload.single('document'), async (req, res) => {
   try {
     const { uid, name, rollNo, department, reason, fromDate, toDate, instituteId } = req.body;
@@ -583,7 +582,7 @@ app.post('/requestLeave', upload.single('document'), async (req, res) => {
       fromDate, 
       toDate, 
       instituteId,
-      documentUrl, // ✅ Save the Proof URL
+      documentUrl, //  Save the Proof URL
       status: 'pending', 
       createdAt: admin.firestore.FieldValue.serverTimestamp()
     });
