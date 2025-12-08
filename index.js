@@ -968,6 +968,77 @@ app.post('/generateDeepTask', async (req, res) => {
     }
 });
 
+app.post('/verifyQuickTask', verifyLimiter, async (req, res) => {
+  try {
+    const { uid, taskTitle, proofText, taskType, xpReward } = req.body;
+    
+    if (!uid || !taskTitle || !proofText) return res.status(400).json({ error: "Missing Proof Data" });
+    
+    // 1. Minimum Effort Check
+    if (proofText.length < 15) return res.status(400).json({ error: "Submission too short. Please provide a real summary/code." });
+
+    const userRef = admin.firestore().collection('users').doc(uid);
+    const userSnap = await userRef.get();
+    const userData = userSnap.data();
+
+    // 2. TIME COOLDOWN (15 Minutes)
+    const now = admin.firestore.Timestamp.now();
+    const lastTime = userData.lastQuickTaskTime;
+    if (lastTime && (now.toMillis() - lastTime.toMillis()) / (1000 * 60) < 15) {
+        const minsLeft = 15 - Math.floor((now.toMillis() - lastTime.toMillis()) / (1000 * 60));
+        return res.status(429).json({ error: `⏳ Cooldown active! Wait ${minsLeft} mins.` });
+    }
+
+    // 3. DAILY CAP (Max 200 Credits/Day)
+    const todayStr = new Date().toDateString();
+    let dailyCredits = 0;
+    if (userData.dailyCreditsDate === todayStr) {
+        dailyCredits = userData.dailyCreditsCount || 0;
+    }
+    if (dailyCredits >= 200) {
+        return res.status(403).json({ error: "🛑 Daily Limit Reached! Come back tomorrow." });
+    }
+
+    // 4. AI VERIFICATION (The "Spam Filter")
+    const systemPrompt = `You are a strict teacher verifying student work. Reply 'VALID' or 'INVALID' only.`;
+    const userPrompt = `
+      Task: "${taskTitle}" (${taskType}).
+      Student Proof: "${proofText}"
+      
+      Rules:
+      - If it's gibberish, random keys, or irrelevant: INVALID.
+      - If it looks like a genuine attempt: VALID.
+    `;
+
+    const aiVerdict = await callGroqAI(systemPrompt, userPrompt, false);
+
+    if (aiVerdict.includes("INVALID")) {
+        return res.status(400).json({ error: "⚠️ AI Verification Failed. Content seems irrelevant or spam." });
+    }
+
+    // 5. SUCCESS: Award Credits
+    const points = xpReward || 30;
+    await userRef.update({ 
+        xp: admin.firestore.FieldValue.increment(points), 
+        lastQuickTaskTime: now,
+        dailyCreditsDate: todayStr,
+        dailyCreditsCount: (userData.dailyCreditsDate === todayStr ? dailyCredits : 0) + points
+    });
+    
+    const newBadges = await checkAndAwardBadges(userRef, (userData.xp || 0) + points, userData.badges);
+
+    return res.json({ 
+        success: true, 
+        message: `✅ Verified! +${points} Credits Earned.`, 
+        newBadges 
+    });
+
+  } catch (err) {
+    console.error("Verification Error:", err);
+    return res.status(500).json({ error: "Verification failed. Try again." });
+  }
+});
+
 
 
 const PORT = process.env.PORT || 8080;
