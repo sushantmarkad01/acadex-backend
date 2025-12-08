@@ -1163,6 +1163,79 @@ app.post('/submitInteractiveTask', async (req, res) => {
     } catch (err) { res.status(500).json({ error: "Error submitting." }); }
 });
 
+app.post('/generatePersonalizedTasks', async (req, res) => {
+    try {
+        const { userProfile } = req.body;
+        
+        // Safety check
+        if (!userProfile || !userProfile.domain) {
+            return res.json({ tasks: [] }); // Return empty if no profile set
+        }
+
+        const prompt = `
+            Generate 3 short, gamified academic tasks for a student.
+            Profile:
+            - Domain: ${userProfile.domain}
+            - Sub-Domain: ${userProfile.subDomain || 'General'}
+            - Skills to Improve: ${userProfile.specificSkills || 'Fundamentals'}
+            
+            Return strictly a JSON array (and nothing else) with this structure:
+            [
+                {
+                    "id": "unique_id",
+                    "title": "Short catchy title",
+                    "type": "Coding" (if tech) or "Quiz" or "Writing",
+                    "description": "1 sentence goal",
+                    "xp": 50,
+                    "content": {
+                        "problemStatement": "Full scenario/problem...",
+                        "starterCode": "function setup() { ... }" (ONLY IF Coding),
+                        "question": "The question text?" (ONLY IF Quiz),
+                        "options": ["A", "B", "C", "D"] (ONLY IF Quiz),
+                        "answerIndex": 0 (ONLY IF Quiz)
+                    }
+                }
+            ]
+        `;
+
+        // Using your existing helper "callGroqAI"
+        const aiResponse = await callGroqAI("Curriculum Designer", prompt, true); 
+        
+        // Handle case where aiResponse might be the parsed JSON or string
+        const tasks = Array.isArray(aiResponse) ? aiResponse : [];
+        res.json({ tasks });
+
+    } catch (error) {
+        console.error("AI Gen Error:", error);
+        res.status(500).json({ error: "Failed to generate tasks" });
+    }
+});
+
+app.post('/verifyAiTask', async (req, res) => {
+    try {
+        const { taskType, originalTask, userSubmission } = req.body;
+
+        const prompt = `
+            Act as a strict teacher.
+            Task Type: ${taskType}
+            Problem: ${JSON.stringify(originalTask)}
+            Student Submission: ${userSubmission}
+
+            Verify if the submission is correct/relevant. 
+            Return strictly JSON: 
+            { 
+                "passed": boolean, 
+                "feedback": "1 sentence constructive feedback" 
+            }
+        `;
+
+        const result = await callGroqAI("Grader", prompt, true);
+        res.json(result);
+    } catch (error) {
+        console.error("Verification Error:", error);
+        res.status(500).json({ error: "Verification failed" });
+    }
+});
 
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => console.log(`Backend running on port ${PORT}`));
