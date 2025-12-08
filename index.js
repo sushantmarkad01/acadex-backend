@@ -1124,86 +1124,133 @@ app.post('/submitInteractiveTask', async (req, res) => {
     try {
         const { uid, taskType, submission, context } = req.body;
         const userRef = admin.firestore().collection('users').doc(uid);
-        const userSnap = await userRef.get();
-        const userData = userSnap.data();
 
         let passed = false;
         let feedback = "";
+        let hint = null; // New "Smart Hint" feature
         let creditsEarned = 0;
 
-        // Validation
-        if (taskType === 'Simulation' || taskType === 'Mystery') {
-            if (submission.answerIndex === context.correctIndex) {
-                passed = true;
-                creditsEarned = 40; // Higher reward for critical thinking
-                feedback = `🎉 Brilliant! ${context.consequence}`;
-            } else {
-                feedback = `❌ Oops. ${context.consequence}`;
-            }
-        } 
-        else if (taskType === 'Coding') {
-            const aiCheck = await callGroqAI("Code Reviewer", `Problem: ${context.scenario}. User Code: ${submission.code}. Correct logic? JSON: { "passed": true, "feedback": "..." }`, true);
+        // --- A. CODING CHALLENGE (Smart Tutor Mode) ---
+        if (taskType === 'Coding') {
+            const systemPrompt = `
+                You are a Code Reviewer. 
+                Task: ${context.problemStatement}
+                Student Code: ${submission.code}
+                
+                Rules:
+                1. If logic is correct, return JSON: { "passed": true, "feedback": "Great job!" }
+                2. If WRONG, return JSON: { "passed": false, "hint": "Give a specific clue (e.g. 'Check your variable scope'), do NOT give the full answer." }
+            `;
+            
+            const aiCheck = await callGroqAI("Code Mentor", systemPrompt, true);
+            
             passed = aiCheck.passed;
-            feedback = aiCheck.feedback;
-            creditsEarned = passed ? 50 : 5;
+            if (passed) {
+                feedback = aiCheck.feedback || "Code Verified! Excellent logic.";
+                creditsEarned = 50;
+            } else {
+                hint = aiCheck.hint || "Something is off. Check your syntax.";
+                feedback = "Keep trying! See the hint below.";
+            }
         }
+
+        // --- B. TYPING TEST (Speed & Accuracy) ---
         else if (taskType === 'Typing') {
-            if (submission.wpm > 20) {
+            // Context.targetText is the original paragraph
+            const { wpm, accuracy } = submission;
+            
+            // Hard Rules: >30 WPM and >90% Accuracy
+            if (wpm >= 30 && accuracy >= 90) {
+                passed = true;
+                creditsEarned = 30;
+                feedback = `🔥 Fast Fingers! ${wpm} WPM & ${accuracy}% Accuracy.`;
+            } else {
+                passed = false;
+                feedback = `Too slow or inaccurate. You need >30 WPM and >90% Accuracy. (You: ${wpm} WPM, ${accuracy}%)`;
+            }
+        }
+
+        // --- C. QUIZ (Instant Check) ---
+        else if (taskType === 'Quiz') {
+            if (submission.answerIndex === context.answerIndex) {
                 passed = true;
                 creditsEarned = 20;
-                feedback = `⚡ Speed: ${submission.wpm} WPM!`;
-            } else { feedback = "Too slow, try again!"; }
+                feedback = "Correct! Well done.";
+            } else {
+                passed = false;
+                feedback = "Incorrect. Try again next time.";
+            }
         }
 
+        // 3. Final Database Update (If Passed)
         if (passed) {
             await userRef.update({ xp: admin.firestore.FieldValue.increment(creditsEarned) });
-            return res.json({ passed: true, credits: creditsEarned, feedback });
+            return res.json({ success: true, passed: true, credits: creditsEarned, feedback });
         } else {
-            return res.json({ passed: false, feedback });
+            return res.json({ success: true, passed: false, feedback, hint }); // Return hint if failed
         }
 
-    } catch (err) { res.status(500).json({ error: "Error submitting." }); }
+    } catch (err) {
+        console.error("Submission Error:", err);
+        res.status(500).json({ error: "Error processing submission." }); 
+    }
 });
 
 app.post('/generatePersonalizedTasks', async (req, res) => {
     try {
         const { userProfile } = req.body;
         
-        // Safety check
         if (!userProfile || !userProfile.domain) {
-            return res.json({ tasks: [] }); // Return empty if no profile set
+            return res.json({ tasks: [] }); 
         }
 
         const prompt = `
-            Generate 3 short, gamified academic tasks for a student.
-            Profile:
-            - Domain: ${userProfile.domain}
-            - Sub-Domain: ${userProfile.subDomain || 'General'}
-            - Skills to Improve: ${userProfile.specificSkills || 'Fundamentals'}
+            Generate exactly 3 short, gamified tasks for a student to do in 5 minutes.
+            Student Profile:
+            - Interest: ${userProfile.domain} (${userProfile.subDomain})
+            - Target Skill: ${userProfile.specificSkills || 'General Essentials'}
             
-            Return strictly a JSON array (and nothing else) with this structure:
+            REQUIRED TASKS (Return strictly valid JSON Array):
+            1. "Coding": A small coding bug or challenge related to ${userProfile.specificSkills}.
+            2. "Quiz": A conceptual multiple-choice question.
+            3. "Typing": A 40-50 word paragraph about ${userProfile.subDomain} history or facts.
+
+            JSON Structure:
             [
                 {
-                    "id": "unique_id",
-                    "title": "Short catchy title",
-                    "type": "Coding" (if tech) or "Quiz" or "Writing",
-                    "description": "1 sentence goal",
+                    "id": "task_1",
+                    "title": "Fix the Bug / Create Comp",
+                    "type": "Coding",
                     "xp": 50,
                     "content": {
-                        "problemStatement": "Full scenario/problem...",
-                        "starterCode": "function setup() { ... }" (ONLY IF Coding),
-                        "question": "The question text?" (ONLY IF Quiz),
-                        "options": ["A", "B", "C", "D"] (ONLY IF Quiz),
-                        "answerIndex": 0 (ONLY IF Quiz)
+                        "problemStatement": "Describe the coding task...",
+                        "starterCode": "const x = 0; // Fix this..."
+                    }
+                },
+                {
+                    "id": "task_2",
+                    "title": "Quick Trivia",
+                    "type": "Quiz",
+                    "xp": 20,
+                    "content": {
+                        "question": "What does...?",
+                        "options": ["A", "B", "C", "D"],
+                        "answerIndex": 0
+                    }
+                },
+                {
+                    "id": "task_3",
+                    "title": "Speed Typing: ${userProfile.subDomain}",
+                    "type": "Typing",
+                    "xp": 30,
+                    "content": {
+                        "targetText": "React is a library... (approx 40 words)"
                     }
                 }
             ]
         `;
 
-        // Using your existing helper "callGroqAI"
-        const aiResponse = await callGroqAI("Curriculum Designer", prompt, true); 
-        
-        // Handle case where aiResponse might be the parsed JSON or string
+        const aiResponse = await callGroqAI("Curriculum Architect", prompt, true); 
         const tasks = Array.isArray(aiResponse) ? aiResponse : [];
         res.json({ tasks });
 
