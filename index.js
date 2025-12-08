@@ -1054,25 +1054,58 @@ app.post('/verifyQuickTask', verifyLimiter, async (req, res) => {
 app.post('/startInteractiveTask', taskLimiter, async (req, res) => {
     try {
         const { taskType, userInterest } = req.body; 
-        // taskType: 'Reading', 'Coding', 'Typing'
-
+        
         let systemPrompt = "";
         let userPrompt = "";
 
-        if (taskType === 'Reading') {
-            systemPrompt = "You are a Tech Reporter. Output strictly valid JSON.";
-            userPrompt = `Generate a short 150-word tech article about "${userInterest || 'Future Tech'}". 
-            Also provide 1 multiple-choice question to test reading comprehension.
-            JSON Format: { "content": "Article text...", "question": "Question text?", "options": ["A", "B", "C", "D"], "correctIndex": 0 }`;
-        } 
-        else if (taskType === 'Coding') {
-            systemPrompt = "You are a Coding Interviewer. Output strictly valid JSON.";
-            userPrompt = `Generate a beginner/intermediate coding problem related to "${userInterest || 'Algorithms'}".
-            JSON Format: { "problemName": "...", "description": "...", "starterCode": "function solve() { ... }", "testCaseInput": "...", "expectedOutput": "..." }`;
+        // 🔥 MODE 1: SIMULATION (Roleplay - No Reading, Just Decisions)
+        if (taskType === 'Simulation') {
+            systemPrompt = "You are a Career Simulator. Create intense, realistic workplace scenarios. Output strictly valid JSON.";
+            userPrompt = `Create a high-stakes scenario for a "${userInterest}" professional.
+            Situation: A critical problem has occurred (e.g., server crash, angry client, budget cut).
+            Task: The user must choose the BEST professional course of action.
+            
+            JSON Format:
+            {
+                "title": "Dramatic Title",
+                "scenario": "You are a senior dev... suddenly...",
+                "role": "Your Job Title",
+                "options": [
+                    "A) Rash Decision (Bad)", 
+                    "B) The Best Professional Move (Correct)", 
+                    "C) Lazy Solution (Mediocre)", 
+                    "D) Unethical Choice (Bad)"
+                ],
+                "correctIndex": 1,
+                "consequence": "Explain briefly why B was the best move."
+            }`;
         }
+        // 🕵️ MODE 2: MYSTERY (Logic Puzzle - Gamified)
+        else if (taskType === 'Mystery') {
+            systemPrompt = "You are a Logic Master. Create riddles and puzzles. Output strictly valid JSON.";
+            userPrompt = `Create a logic puzzle or mystery related to "${userInterest}".
+            Example: A broken code snippet, a missing server log, or a design flaw.
+            
+            JSON Format:
+            {
+                "title": "The Case of the...",
+                "scenario": "Clues: 1..., 2..., 3...",
+                "role": "Detective",
+                "options": ["Suspect A", "Suspect B", "Suspect C", "Suspect D"],
+                "correctIndex": 2,
+                "consequence": "The solution was..."
+            }`;
+        } 
+        // 💻 MODE 3: CODING (Keep - it's practical)
+        else if (taskType === 'Coding') {
+            systemPrompt = "You are a Senior Tech Lead. Output strictly valid JSON.";
+            userPrompt = `Give a junior developer a "${userInterest}" bug to fix or a function to write.
+            JSON Format: { "title": "...", "scenario": "Your goal is to...", "starterCode": "...", "expectedOutput": "..." }`;
+        }
+        // ⌨️ MODE 4: TYPING (Keep - it's easy XP)
         else if (taskType === 'Typing') {
-            systemPrompt = "You are a Typing Coach. Output strictly valid JSON.";
-            userPrompt = `Generate a 30-word interesting fact about "${userInterest || 'Science'}". JSON Format: { "textToType": "..." }`;
+            systemPrompt = "Output strictly valid JSON.";
+            userPrompt = `Generate a fascinating fact about "${userInterest}" (max 30 words). JSON Format: { "textToType": "..." }`;
         }
 
         const data = await callGroqAI(systemPrompt, userPrompt, true);
@@ -1084,75 +1117,51 @@ app.post('/startInteractiveTask', taskLimiter, async (req, res) => {
     }
 });
 
-// 2. VERIFY & GRADE (The AI Judge)
+// 2. SUBMIT & GRADE
 app.post('/submitInteractiveTask', async (req, res) => {
     try {
         const { uid, taskType, submission, context } = req.body;
-        // submission: { answerIndex: 1 } OR { code: "..." } OR { wpm: 45, accuracy: 98 }
-        
         const userRef = admin.firestore().collection('users').doc(uid);
         const userSnap = await userRef.get();
-        if (!userSnap.exists) return res.status(404).json({ error: "User not found" });
         const userData = userSnap.data();
 
         let passed = false;
         let feedback = "";
         let creditsEarned = 0;
 
-        // --- VALIDATION LOGIC ---
-        if (taskType === 'Reading') {
-            // Context contains the correct index from the previous step (Client shouldn't see this ideally, but for MVP we trust client state slightly or store in DB)
-            // Ideally: We re-ask AI to verify, or compare with stored answer.
-            // For security, we ask AI to check if the logic holds (or check simple index if passed securely).
-            // Here we assume "context" holds the correct answer passed from client (Secure version: Store answer in DB on gen).
-            
+        // Validation
+        if (taskType === 'Simulation' || taskType === 'Mystery') {
             if (submission.answerIndex === context.correctIndex) {
                 passed = true;
-                creditsEarned = 30;
-                feedback = "Correct! Good reading comprehension.";
+                creditsEarned = 40; // Higher reward for critical thinking
+                feedback = `🎉 Brilliant! ${context.consequence}`;
             } else {
-                feedback = "Incorrect answer. Read carefully next time.";
+                feedback = `❌ Oops. ${context.consequence}`;
             }
         } 
         else if (taskType === 'Coding') {
-            // Ask AI to review the code
-            const aiCheck = await callGroqAI(
-                "You are a Code Compiler.", 
-                `Problem: ${context.description}. \nUser Code: ${submission.code}. \nDoes this code solve the problem logic correctly? Return JSON: { "passed": true/false, "feedback": "..." }`, 
-                true
-            );
+            const aiCheck = await callGroqAI("Code Reviewer", `Problem: ${context.scenario}. User Code: ${submission.code}. Correct logic? JSON: { "passed": true, "feedback": "..." }`, true);
             passed = aiCheck.passed;
             feedback = aiCheck.feedback;
             creditsEarned = passed ? 50 : 5;
         }
         else if (taskType === 'Typing') {
-            if (submission.accuracy > 90 && submission.wpm > 20) {
+            if (submission.wpm > 20) {
                 passed = true;
                 creditsEarned = 20;
-                feedback = `Great speed! ${submission.wpm} WPM.`;
-            } else {
-                feedback = "Too many errors or too slow.";
-            }
+                feedback = `⚡ Speed: ${submission.wpm} WPM!`;
+            } else { feedback = "Too slow, try again!"; }
         }
 
-        // --- UPDATE DB ---
         if (passed) {
-            await userRef.update({ 
-                xp: admin.firestore.FieldValue.increment(creditsEarned),
-                lastQuickTaskTime: admin.firestore.FieldValue.serverTimestamp()
-            });
-            const newBadges = await checkAndAwardBadges(userRef, (userData.xp || 0) + creditsEarned, userData.badges);
-            return res.json({ passed: true, credits: creditsEarned, feedback, newBadges });
+            await userRef.update({ xp: admin.firestore.FieldValue.increment(creditsEarned) });
+            return res.json({ passed: true, credits: creditsEarned, feedback });
         } else {
             return res.json({ passed: false, feedback });
         }
 
-    } catch (err) {
-        console.error("Submit Task Error:", err);
-        res.status(500).json({ error: "Verification failed" });
-    }
+    } catch (err) { res.status(500).json({ error: "Error submitting." }); }
 });
-
 
 
 const PORT = process.env.PORT || 8080;
