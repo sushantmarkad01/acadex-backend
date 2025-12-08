@@ -11,6 +11,12 @@ const app = express();
 app.use(cors({ origin: true }));
 app.use(express.json());
 
+const taskLimiter = rateLimit({ 
+    windowMs: 15 * 60 * 1000, // 15 mins
+    max: 20, 
+    message: { error: "Too many tasks generated. Slow down!" } 
+});
+
 // --- RATE LIMITER CONFIG ---
 // Limit requests to 60 per minute per IP to prevent abuse
 const limiter = rateLimit({
@@ -19,6 +25,12 @@ const limiter = rateLimit({
   message: { error: "Too many requests, please try again later." }
 });
 app.use(limiter);
+
+const verifyLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, 
+  max: 10,
+  message: { error: "Verification limit reached. Please wait 15 minutes." }
+});
 
 // --- 1. MULTER CONFIG (RAM Storage) ---
 const upload = multer({ 
@@ -1037,6 +1049,108 @@ app.post('/verifyQuickTask', verifyLimiter, async (req, res) => {
     console.error("Verification Error:", err);
     return res.status(500).json({ error: "Verification failed. Try again." });
   }
+});
+
+app.post('/startInteractiveTask', taskLimiter, async (req, res) => {
+    try {
+        const { taskType, userInterest } = req.body; 
+        // taskType: 'Reading', 'Coding', 'Typing'
+
+        let systemPrompt = "";
+        let userPrompt = "";
+
+        if (taskType === 'Reading') {
+            systemPrompt = "You are a Tech Reporter. Output strictly valid JSON.";
+            userPrompt = `Generate a short 150-word tech article about "${userInterest || 'Future Tech'}". 
+            Also provide 1 multiple-choice question to test reading comprehension.
+            JSON Format: { "content": "Article text...", "question": "Question text?", "options": ["A", "B", "C", "D"], "correctIndex": 0 }`;
+        } 
+        else if (taskType === 'Coding') {
+            systemPrompt = "You are a Coding Interviewer. Output strictly valid JSON.";
+            userPrompt = `Generate a beginner/intermediate coding problem related to "${userInterest || 'Algorithms'}".
+            JSON Format: { "problemName": "...", "description": "...", "starterCode": "function solve() { ... }", "testCaseInput": "...", "expectedOutput": "..." }`;
+        }
+        else if (taskType === 'Typing') {
+            systemPrompt = "You are a Typing Coach. Output strictly valid JSON.";
+            userPrompt = `Generate a 30-word interesting fact about "${userInterest || 'Science'}". JSON Format: { "textToType": "..." }`;
+        }
+
+        const data = await callGroqAI(systemPrompt, userPrompt, true);
+        res.json(data);
+
+    } catch (err) {
+        console.error("Task Gen Error:", err);
+        res.status(500).json({ error: "Failed to generate task." });
+    }
+});
+
+// 2. VERIFY & GRADE (The AI Judge)
+app.post('/submitInteractiveTask', async (req, res) => {
+    try {
+        const { uid, taskType, submission, context } = req.body;
+        // submission: { answerIndex: 1 } OR { code: "..." } OR { wpm: 45, accuracy: 98 }
+        
+        const userRef = admin.firestore().collection('users').doc(uid);
+        const userSnap = await userRef.get();
+        if (!userSnap.exists) return res.status(404).json({ error: "User not found" });
+        const userData = userSnap.data();
+
+        let passed = false;
+        let feedback = "";
+        let creditsEarned = 0;
+
+        // --- VALIDATION LOGIC ---
+        if (taskType === 'Reading') {
+            // Context contains the correct index from the previous step (Client shouldn't see this ideally, but for MVP we trust client state slightly or store in DB)
+            // Ideally: We re-ask AI to verify, or compare with stored answer.
+            // For security, we ask AI to check if the logic holds (or check simple index if passed securely).
+            // Here we assume "context" holds the correct answer passed from client (Secure version: Store answer in DB on gen).
+            
+            if (submission.answerIndex === context.correctIndex) {
+                passed = true;
+                creditsEarned = 30;
+                feedback = "Correct! Good reading comprehension.";
+            } else {
+                feedback = "Incorrect answer. Read carefully next time.";
+            }
+        } 
+        else if (taskType === 'Coding') {
+            // Ask AI to review the code
+            const aiCheck = await callGroqAI(
+                "You are a Code Compiler.", 
+                `Problem: ${context.description}. \nUser Code: ${submission.code}. \nDoes this code solve the problem logic correctly? Return JSON: { "passed": true/false, "feedback": "..." }`, 
+                true
+            );
+            passed = aiCheck.passed;
+            feedback = aiCheck.feedback;
+            creditsEarned = passed ? 50 : 5;
+        }
+        else if (taskType === 'Typing') {
+            if (submission.accuracy > 90 && submission.wpm > 20) {
+                passed = true;
+                creditsEarned = 20;
+                feedback = `Great speed! ${submission.wpm} WPM.`;
+            } else {
+                feedback = "Too many errors or too slow.";
+            }
+        }
+
+        // --- UPDATE DB ---
+        if (passed) {
+            await userRef.update({ 
+                xp: admin.firestore.FieldValue.increment(creditsEarned),
+                lastQuickTaskTime: admin.firestore.FieldValue.serverTimestamp()
+            });
+            const newBadges = await checkAndAwardBadges(userRef, (userData.xp || 0) + creditsEarned, userData.badges);
+            return res.json({ passed: true, credits: creditsEarned, feedback, newBadges });
+        } else {
+            return res.json({ passed: false, feedback });
+        }
+
+    } catch (err) {
+        console.error("Submit Task Error:", err);
+        res.status(500).json({ error: "Verification failed" });
+    }
 });
 
 
