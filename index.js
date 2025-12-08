@@ -4,6 +4,8 @@ const cors = require('cors');
 const multer = require('multer'); // 1. Import Multer
 const cloudinary = require('cloudinary').v2; //  2. Import Cloudinary
 const rateLimit = require('express-rate-limit'); //  3. Import Rate Limiter
+const speakeasy = require('speakeasy');
+const QRCode = require('qrcode');
 const { callGroqAI, computeHash, isUnsafe, MODEL_ID } = require('./lib/groqClient'); 
 require('dotenv').config(); 
 
@@ -1235,6 +1237,68 @@ app.post('/verifyAiTask', async (req, res) => {
         console.error("Verification Error:", error);
         res.status(500).json({ error: "Verification failed" });
     }
+});
+
+app.post('/setup2FA', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization || '';
+    const token = authHeader.split('Bearer ')[1];
+    if (!token) return res.status(401).json({ error: 'Unauthorized' });
+    
+    const decoded = await admin.auth().verifyIdToken(token);
+    const uid = decoded.uid;
+
+    const secret = speakeasy.generateSecret({ name: `AcadeX (${decoded.email})` });
+    const qrImage = await QRCode.toDataURL(secret.otpauth_url);
+
+    // Save temporary secret
+    await admin.firestore().collection('secrets').doc(uid).set({
+      tempSecret: secret.base32,
+      createdAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    res.json({ qrImage, manualEntry: secret.base32 });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// 2. Verify: Enable 2FA
+app.post('/verify2FA', async (req, res) => {
+  try {
+    const { token: userCode, isLogin } = req.body;
+    const authHeader = req.headers.authorization || '';
+    const token = authHeader.split('Bearer ')[1];
+    if (!token) return res.status(401).json({ error: 'Unauthorized' });
+
+    const decoded = await admin.auth().verifyIdToken(token);
+    const uid = decoded.uid;
+
+    const secretDoc = await admin.firestore().collection('secrets').doc(uid).get();
+    if (!secretDoc.exists) return res.status(400).json({ error: 'Setup not started' });
+    
+    const data = secretDoc.data();
+    const secretKey = isLogin ? data.secret : data.tempSecret;
+
+    const verified = speakeasy.totp.verify({
+      secret: secretKey,
+      encoding: 'base32',
+      token: userCode,
+      window: 1 
+    });
+
+    if (verified) {
+      if (!isLogin) {
+        // Activate 2FA permanently
+        await admin.firestore().collection('secrets').doc(uid).update({
+          secret: secretKey,
+          tempSecret: admin.firestore.FieldValue.delete()
+        });
+        await admin.firestore().collection('users').doc(uid).update({ is2FAEnabled: true });
+      }
+      res.json({ success: true });
+    } else {
+      res.status(400).json({ error: "Invalid Code" });
+    }
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 const PORT = process.env.PORT || 8080;
