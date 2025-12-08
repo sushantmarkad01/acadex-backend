@@ -910,6 +910,64 @@ app.post('/gradeSubmission', async (req, res) => {
     } catch (err) { return res.status(500).json({ error: err.message }); }
 });
 
+// 25. Generate Deep Contextual Task (The "Syllabus Architect")
+app.post('/generateDeepTask', async (req, res) => {
+    try {
+        const { userProfile } = req.body; 
+        // userProfile expects: { firstName, department, year, domain, subDomain, specificSkills }
+        
+        if (!userProfile) return res.status(400).json({ error: "Missing Profile Data" });
+
+        const { domain, subDomain, specificSkills, year, department } = userProfile;
+
+        // 1. Construct the "Deep Context" Prompt
+        const systemPrompt = `
+            You are an expert Academic Mentor and Curriculum Architect for university students.
+            Your goal is to create a single, highly practical, short-duration (15-30 min) micro-task that bridges the gap between a student's academic syllabus and their career interest.
+            
+            OUTPUT RULES:
+            - Return STRICT JSON only.
+            - No markdown, no conversation.
+        `;
+
+        const userPrompt = `
+            Student Profile:
+            - Year/Dept: ${year} Year, ${department} Engineering.
+            - Interest Domain: ${domain} -> ${subDomain}.
+            - Specific Focus/Weakness: ${specificSkills || 'General Foundations'}.
+            
+            Task Requirements:
+            1. Create a "Mini-Project" or "Skill Challenge" that takes 20-30 minutes.
+            2. It must be specific (e.g., don't say "Code something", say "Create a REST API for...").
+            3. It should relate to their specific skills if mentioned.
+            
+            JSON Schema:
+            {
+              "taskTitle": "Catchy Title",
+              "difficulty": "Easy" | "Medium" | "Hard",
+              "estimatedTime": "20 min",
+              "xpReward": 100,
+              "skillsTargeted": ["Skill 1", "Skill 2"],
+              "instructions": [
+                "Step 1: ...",
+                "Step 2: ...",
+                "Step 3: ..."
+              ],
+              "deliverableType": "code_snippet" | "text_summary" | "file_upload" 
+            }
+        `;
+
+        // 2. Call Groq with JSON Enforcement
+        const taskJson = await callGroqAI(systemPrompt, userPrompt, true);
+
+        return res.json({ task: taskJson });
+
+    } catch (err) {
+        console.error("Deep Task Error:", err);
+        return res.status(500).json({ error: "Failed to generate task." });
+    }
+});
+
 
 
 const PORT = process.env.PORT || 8080;
