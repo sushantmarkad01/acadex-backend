@@ -337,64 +337,21 @@ app.get('/health', (req, res) => res.json({ status: 'ok', demoMode: DEMO_MODE })
 
 // 1. Create User
 app.post('/createUser', async (req, res) => {
-  try {
-    const { 
-        email, password, firstName, lastName, role, 
-        instituteId, // The plaintext ID from the request
-        instituteName, department, subject, rollNo, qualification, extras = {} 
-    } = req.body;
-    
-    // --- 1. ENCRYPT the sensitive data (instituteId) ---
-    // This calls the function you defined (from Step 2)
-    const encryptedInstituteId = encryptData(instituteId); 
-    
-    if (!encryptedInstituteId) {
-        // Handle case where encryption fails due to missing key or bad input
-        return res.status(500).json({ error: 'Failed to encrypt institute data.' });
-    }
-
-    // 2. Create user in Firebase Authentication
-    const userRecord = await admin.auth().createUser({ 
-        email, 
-        password, 
-        displayName: `${firstName} ${lastName}` 
-    });
-    
-    // 3. Prepare the Firestore document
-    const userDoc = { 
-        uid: userRecord.uid, 
-        email, 
-        role, 
-        firstName, 
-        lastName, 
-        
-        // --- STORE THE ENCRYPTED ID ---
-        instituteId: encryptedInstituteId, // 🔐 This is the ciphertext
-        
-        instituteName, 
-        department: department || null, 
-        subject: subject || null, 
-        rollNo: rollNo || null, 
-        qualification: qualification || null,
-        xp: 0, badges: [], 
-        createdAt: admin.firestore.FieldValue.serverTimestamp(), 
-        ...extras 
-    };
-    
-    // 4. Save to Firestore
-    await admin.firestore().collection('users').doc(userRecord.uid).set(userDoc);
-    
-    // NOTE: For Firebase Auth claims, you usually need the plaintext ID 
-    // for security rules or custom logic, but be cautious with this.
-    await admin.auth().setCustomUserClaims(userRecord.uid, { role, instituteId }); 
-    
-    return res.json({ message: 'User created successfully and institute ID secured', uid: userRecord.uid });
-    
-  } catch (err) { 
-    console.error("Create User Error:", err);
-    return res.status(500).json({ error: err.message }); 
-}
+  try {
+    const { email, password, firstName, lastName, role, instituteId, instituteName, department, subject, rollNo, qualification, extras = {} } = req.body;
+    const userRecord = await admin.auth().createUser({ email, password, displayName: `${firstName} ${lastName}` });
+    const userDoc = { 
+        uid: userRecord.uid, email, role, firstName, lastName, instituteId, instituteName, 
+        department: department || null, subject: subject || null, rollNo: rollNo || null, qualification: qualification || null,
+        xp: 0, badges: [], 
+        createdAt: admin.firestore.FieldValue.serverTimestamp(), ...extras 
+    };
+    await admin.firestore().collection('users').doc(userRecord.uid).set(userDoc);
+    await admin.auth().setCustomUserClaims(userRecord.uid, { role, instituteId });
+    return res.json({ message: 'User created successfully', uid: userRecord.uid });
+  } catch (err) { return res.status(500).json({ error: err.message }); }
 });
+
 // Route 2: Mark Attendance
 app.post('/markAttendance', async (req, res) => {
   try {
@@ -1389,65 +1346,6 @@ app.post('/verify2FA', async (req, res) => {
       res.status(400).json({ error: "Invalid Code" });
     }
   } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// Route 1: Create User
-app.post('/createUser', async (req, res) => {
-    try {
-        const { email, password, firstName, lastName, role, instituteId, instituteName, ... } = req.body;
-        
-        // --- 🔑 ENCRYPT HERE ---
-        const encryptedInstituteId = encryptData(instituteId); // <-- The encryption step
-        
-        if (!encryptedInstituteId) {
-             return res.status(500).json({ error: 'Failed to encrypt data.' });
-        }
-
-        const userRecord = await admin.auth().createUser({ email, password, displayName: `${firstName} ${lastName}` });
-        
-        const userDoc = { 
-            // ...
-            // Store the encrypted string in the database
-            instituteId: encryptedInstituteId, 
-            instituteName,
-            // ...
-        };
-        
-        await admin.firestore().collection('users').doc(userRecord.uid).set(userDoc);
-        
-        // NOTE: If you need to search or use the ID in Firebase Auth claims (which is common), 
-        // you should consider hashing the ID and storing the hash alongside the encrypted ID. 
-        // For simplicity here, we stick to the provided code logic.
-        await admin.auth().setCustomUserClaims(userRecord.uid, { role, instituteId }); 
-        
-        return res.json({ message: 'User created successfully', uid: userRecord.uid });
-    } catch (err) { return res.status(500).json({ error: err.message }); }
-});
-
-// Example: A hypothetical route to get a user's *real* ID for an internal process
-app.get('/admin/getUserInstitute/:uid', async (req, res) => {
-    try {
-        const { uid } = req.params;
-        const userSnap = await admin.firestore().collection('users').doc(uid).get();
-
-        if (!userSnap.exists) return res.status(404).json({ error: "User not found" });
-
-        const encryptedId = userSnap.data().instituteId;
-        
-        // --- 🔑 DECRYPT HERE ---
-        const realInstituteId = decryptData(encryptedId); // <-- The decryption step
-        
-        if (!realInstituteId) {
-            return res.status(500).json({ error: 'Decryption failed. Data may be corrupt.' });
-        }
-
-        return res.json({ 
-            uid,
-            realInstituteId: realInstituteId,
-            message: "Success! Real ID retrieved (backend only)."
-        });
-        
-    } catch (err) { return res.status(500).json({ error: err.message }); }
 });
 
 const PORT = process.env.PORT || 8080;
