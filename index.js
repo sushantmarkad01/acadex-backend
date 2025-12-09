@@ -754,22 +754,20 @@ app.post('/generateQuiz', async (req, res) => {
         const apiKey = process.env.GROQ_API_KEY;
 
         const systemPrompt = `
-            You are a strict academic professor.
-            Generate a challenging 15-question quiz for a ${department} student (Sem ${semester}) aspiring to be a "${careerGoal}".
-            
-            Also, provide a short "Career Roadmap" paragraph at the end explaining how this quiz relates to their goal.
+            You are a professor creating a quick-fire quiz.
+            Generate 10 Multiple Choice Questions (MCQs) for a ${department} student in Semester ${semester}.
+            Focus on topics relevant to: "${careerGoal}".
             
             Return STRICT JSON format:
             {
               "questions": [
                 {
-                  "question": "...",
-                  "options": ["A", "B", "C", "D"],
+                  "question": "Question text here?",
+                  "options": ["Option A", "Option B", "Option C", "Option D"],
                   "answer": "Option A",
-                  "explanation": "..."
+                  "explanation": "Short explanation of why A is correct."
                 }
-              ],
-              "careerAdvice": "To become a ${careerGoal}, focus on..."
+              ]
             }
         `;
 
@@ -787,8 +785,8 @@ app.post('/generateQuiz', async (req, res) => {
         });
 
         const data = await response.json();
-        const content = data.choices[0].message.content;
-        res.json(JSON.parse(content));
+        const cleanJson = data.choices[0].message.content.replace(/```json|```/g, '').trim();
+        res.json(JSON.parse(cleanJson));
 
     } catch (error) {
         console.error("Quiz Gen Error:", error);
