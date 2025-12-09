@@ -1113,6 +1113,10 @@ app.post('/startInteractiveTask', taskLimiter, async (req, res) => {
             systemPrompt = "Output strictly valid JSON.";
             userPrompt = `Generate a fascinating fact about "${userInterest}" (max 30 words). JSON Format: { "textToType": "..." }`;
         }
+        else if (taskType === 'FlashCard') {
+            systemPrompt = "You are a Revision Expert. Output strict JSON.";
+            userPrompt = `Create 5 concise revision flashcards for "${userInterest}". JSON Format: { "cards": [{ "front": "Term", "back": "Definition (Max 15 words)" }] }`;
+        }
 
         const data = await callGroqAI(systemPrompt, userPrompt, true);
         res.json(data);
