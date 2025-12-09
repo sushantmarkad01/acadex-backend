@@ -10,69 +10,54 @@ const {
 
 const db = admin.firestore();
 
-// -------------------------------------------------------------------------
-// 🚨 CONFIGURATION (Matches your Frontend)
-// -------------------------------------------------------------------------
+// 🚨 MUST MATCH YOUR FRONTEND URL EXACTLY
 const RP_ID = 'scheduplan-1b51d.web.app'; 
 const ORIGIN = 'https://scheduplan-1b51d.web.app'; 
-// -------------------------------------------------------------------------
 
 const challengeStore = {}; 
 
-// ==========================================
 // 1. REGISTRATION (SETUP)
-// ==========================================
 router.get('/register-start', async (req, res) => {
     const { userId } = req.query;
     if(!userId) return res.status(400).json({ error: "User ID required" });
     
     try {
-        console.log(`[PASSKEY] Starting registration for: ${userId}`);
-        
         const userDoc = await db.collection('users').doc(userId).get();
         if (!userDoc.exists) return res.status(404).json({ error: "User not found" });
-        const user = userDoc.data();
+        const user = userDoc.data() || {};
 
-        // 🛡️ SAFETY CHECK: Filter out broken/empty authenticators
-        const existingAuthenticators = (user.authenticators || [])
-            .filter(auth => auth && auth.credentialID) // Only keep valid ones
-            .map(auth => ({
-                id: auth.credentialID,
-                type: 'public-key',
-            }));
-
+        // Generate options (Simplified to prevent crashes)
         const options = await generateRegistrationOptions({
             rpName: 'AcadeX App',
             rpID: RP_ID,
-            userID: String(userId), // Ensure it's a string
-            userName: user.email || user.firstName || 'User',
-            excludeCredentials: existingAuthenticators,
+            userID: String(userId),
+            userName: user.email || 'User',
+            // We temporarily remove 'excludeCredentials' to stop the 500 crash
             authenticatorSelection: {
                 residentKey: 'preferred',
                 userVerification: 'preferred',
-                authenticatorAttachment: 'platform',
+                authenticatorAttachment: 'platform', 
             },
         });
 
         challengeStore[userId] = options.challenge;
-        console.log(`[PASSKEY] Challenge generated successfully`);
-        
         res.json(options);
+
     } catch (error) {
-        // 🚨 THIS LOG WILL SHOW IN RENDER DASHBOARD
-        console.error("🔥 CRITICAL REGISTRATION ERROR:", error);
-        res.status(500).json({ error: "Internal Server Error", details: error.message });
+        console.error("🔥 REGISTRATION ERROR:", error);
+        // This will print the REAL error to your Render logs
+        res.status(500).json({ error: error.message });
     }
 });
 
+// 2. VERIFY REGISTRATION
 router.post('/register-finish', async (req, res) => {
     const { userId, data } = req.body;
     const expectedChallenge = challengeStore[userId];
 
-    if (!expectedChallenge) return res.status(400).json({ error: 'Challenge expired or invalid' });
+    if (!expectedChallenge) return res.status(400).json({ error: 'Challenge expired' });
 
     try {
-        console.log(`[PASSKEY] Verifying registration for: ${userId}`);
         const verification = await verifyRegistrationResponse({
             response: data,
             expectedChallenge,
@@ -87,7 +72,6 @@ router.post('/register-finish', async (req, res) => {
                 credentialID: registrationInfo.credentialID,
                 credentialPublicKey: registrationInfo.credentialPublicKey.toString('base64'),
                 counter: registrationInfo.counter,
-                transports: registrationInfo.transports || []
             };
 
             await db.collection('users').doc(userId).update({
@@ -95,20 +79,17 @@ router.post('/register-finish', async (req, res) => {
             });
 
             delete challengeStore[userId];
-            console.log(`[PASSKEY] Registration Verified & Saved`);
             res.json({ verified: true });
         } else {
-            res.status(400).json({ verified: false, error: "Verification failed" });
+            res.status(400).json({ verified: false });
         }
     } catch (error) {
-        console.error("🔥 VERIFICATION ERROR:", error);
+        console.error("🔥 VERIFY ERROR:", error);
         res.status(400).json({ error: error.message });
     }
 });
 
-// ==========================================
-// 2. AUTHENTICATION (LOGIN)
-// ==========================================
+// 3. LOGIN START
 router.get('/login-start', async (req, res) => {
     const { userId } = req.query;
     try {
@@ -116,16 +97,15 @@ router.get('/login-start', async (req, res) => {
         if (!userDoc.exists) return res.status(404).json({ error: 'User not found' });
         const user = userDoc.data();
 
-        // 🛡️ SAFETY CHECK
-        const userAuthenticators = (user.authenticators || []).filter(auth => auth && auth.credentialID);
-
-        if (userAuthenticators.length === 0) {
+        // Safety check for empty authenticators
+        if (!user.authenticators || user.authenticators.length === 0) {
             return res.status(400).json({ error: 'No passkeys registered' });
         }
 
         const options = await generateAuthenticationOptions({
             rpID: RP_ID,
-            allowCredentials: userAuthenticators.map(auth => ({
+            // Only map if valid
+            allowCredentials: user.authenticators.map(auth => ({
                 id: auth.credentialID,
                 type: 'public-key',
             })),
@@ -140,6 +120,7 @@ router.get('/login-start', async (req, res) => {
     }
 });
 
+// 4. LOGIN FINISH
 router.post('/login-finish', async (req, res) => {
     const { userId, data } = req.body;
     try {
@@ -147,13 +128,12 @@ router.post('/login-finish', async (req, res) => {
         const user = userDoc.data();
         const expectedChallenge = challengeStore[userId];
         
-        // Find authenticator
-        const authenticatorBase64 = (user.authenticators || []).find(auth => auth.credentialID === data.id);
-        if (!authenticatorBase64) return res.status(400).send('Authenticator not found');
+        const authData = user.authenticators.find(auth => auth.credentialID === data.id);
+        if (!authData) return res.status(400).send('Authenticator not found');
 
         const authenticator = {
-            ...authenticatorBase64,
-            credentialPublicKey: Buffer.from(authenticatorBase64.credentialPublicKey, 'base64')
+            ...authData,
+            credentialPublicKey: Buffer.from(authData.credentialPublicKey, 'base64')
         };
 
         const verification = await verifyAuthenticationResponse({
@@ -165,6 +145,7 @@ router.post('/login-finish', async (req, res) => {
         });
 
         if (verification.verified) {
+            // Update counter
             const updatedAuths = user.authenticators.map(auth => {
                 if (auth.credentialID === data.id) {
                     return { ...auth, counter: verification.authenticationInfo.newCounter };
