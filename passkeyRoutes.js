@@ -12,7 +12,7 @@ const {
 const db = admin.firestore();
 
 // CONSTANTS (Update these for production!)
-const RP_ID = 'acadex-backend-n2wh.onrender.com'; // Your Render backend domain (without https://)
+const RP_ID = 'acadex-app.onrender.com'; // Your Render backend domain (without https://)
 // For local testing use: 'localhost' 
 const ORIGIN = 'https://acadex-app.onrender.com'; // Your Frontend URL
 // For local testing use: 'http://localhost:3000'
@@ -37,7 +37,8 @@ router.get('/register-start', async (req, res) => {
         userName: user.email || 'User',
         // Prevent registering the same finger twice
         excludeCredentials: (user.authenticators || []).map(auth => ({
-            id: auth.credentialID,
+           id: Buffer.from(auth.credentialID, 'base64url')
+
             type: 'public-key',
         })),
         authenticatorSelection: {
@@ -72,7 +73,8 @@ router.post('/register-finish', async (req, res) => {
 
             // Prepare key for Firestore (Convert Buffer to Base64)
             const newAuthenticator = {
-                credentialID: registrationInfo.credentialID,
+               credentialID: registrationInfo.credentialID.toString('base64url')
+
                 credentialPublicKey: registrationInfo.credentialPublicKey.toString('base64'),
                 counter: registrationInfo.counter,
                 transports: registrationInfo.transports || []
