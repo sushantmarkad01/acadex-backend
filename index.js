@@ -6,13 +6,65 @@ const cloudinary = require('cloudinary').v2; //  2. Import Cloudinary
 const rateLimit = require('express-rate-limit'); //  3. Import Rate Limiter
 const speakeasy = require('speakeasy');
 const QRCode = require('qrcode');
+// ✅ 1. ADD CRYPTO MODULE (Built-in)
+const crypto = require('crypto'); 
+
 const { callGroqAI, computeHash, isUnsafe, MODEL_ID } = require('./lib/groqClient'); 
 
 require('dotenv').config(); 
 
 const app = express();
-app.use(cors({ origin: true }));
+
+// ✅ 2. SECURE CORS (Updates for Passkeys)
+app.use(cors({ 
+  origin: 'https://scheduplan-1b51d.web.app', // Your frontend URL
+  methods: ['GET', 'POST', 'PUT', 'DELETE'],
+  credentials: true 
+}));
+
 app.use(express.json());
+
+// ==========================================
+// 🔐 ENCRYPTION HELPERS
+// ==========================================
+const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY; // Must be set in Render
+const IV_LENGTH = 16; // AES requires 16 bytes IV
+
+function encrypt(text) {
+    if (!text) return text;
+    try {
+        if (!ENCRYPTION_KEY || ENCRYPTION_KEY.length !== 32) {
+            console.warn("⚠️ ENCRYPTION SKIPPED: Key invalid/missing.");
+            return text; 
+        }
+        const iv = crypto.randomBytes(IV_LENGTH);
+        const cipher = crypto.createCipheriv('aes-256-cbc', Buffer.from(ENCRYPTION_KEY), iv);
+        let encrypted = cipher.update(text);
+        encrypted = Buffer.concat([encrypted, cipher.final()]);
+        return iv.toString('hex') + ':' + encrypted.toString('hex');
+    } catch (error) {
+        console.error("Encryption Error:", error);
+        return text;
+    }
+}
+
+function decrypt(text) {
+    if (!text || !text.includes(':')) return text;
+    try {
+        if (!ENCRYPTION_KEY || ENCRYPTION_KEY.length !== 32) return text;
+        const textParts = text.split(':');
+        const iv = Buffer.from(textParts.shift(), 'hex');
+        const encryptedText = Buffer.from(textParts.join(':'), 'hex');
+        const decipher = crypto.createDecipheriv('aes-256-cbc', Buffer.from(ENCRYPTION_KEY), iv);
+        let decrypted = decipher.update(encryptedText);
+        decrypted = Buffer.concat([decrypted, decipher.final()]);
+        return decrypted.toString();
+    } catch (error) {
+        console.error("Decryption Error:", error);
+        return text;
+    }
+}
+// ==========================================
 
 const taskLimiter = rateLimit({ 
     windowMs: 15 * 60 * 1000, // 15 mins
@@ -21,7 +73,6 @@ const taskLimiter = rateLimit({
 });
 
 // --- RATE LIMITER CONFIG ---
-// Limit requests to 60 per minute per IP to prevent abuse
 const limiter = rateLimit({
   windowMs: 1 * 60 * 1000, 
   max: 60,
@@ -42,7 +93,6 @@ const upload = multer({
 });
 
 // --- 2. CLOUDINARY CONFIG ---
-// Ensure these are in your Render Environment Variables
 cloudinary.config({ 
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME, 
   api_key: process.env.CLOUDINARY_API_KEY, 
@@ -69,6 +119,7 @@ function initFirebaseAdmin() {
 }
 initFirebaseAdmin();
 
+// ✅ PASSKEY ROUTES (Correct Order)
 const passkeyRoutes = require('./passkeyRoutes');
 app.use('/auth/passkeys', passkeyRoutes);
 
@@ -92,7 +143,7 @@ function getDistance(lat1, lon1, lat2, lon2) {
 async function uploadToCloudinary(fileBuffer) {
     return new Promise((resolve, reject) => {
         const stream = cloudinary.uploader.upload_stream(
-            { folder: "acadex_docs", resource_type: "auto" }, // auto detects PDF/Img
+            { folder: "acadex_docs", resource_type: "auto" }, 
             (error, result) => {
                 if (error) reject(error);
                 else resolve(result.secure_url);
@@ -102,7 +153,7 @@ async function uploadToCloudinary(fileBuffer) {
     });
 }
 
-// Helper: Recursive Delete (For cleaning up Institutes)
+// Helper: Recursive Delete 
 async function deleteCollection(db, collectionPath, batchSize, queryField, queryValue) {
   const collectionRef = db.collection(collectionPath);
   const query = collectionRef.where(queryField, '==', queryValue).limit(batchSize);
@@ -157,7 +208,6 @@ app.post('/storeTopic', async (req, res) => {
     const topicId = computeHash(topic.toLowerCase().trim());
     const userRef = admin.firestore().collection('users').doc(userId);
     
-    // Update User's Latest Topic
     await userRef.update({
       latestTopic: {
         topicId,
@@ -166,7 +216,6 @@ app.post('/storeTopic', async (req, res) => {
       }
     });
 
-    // Store Topic in Sub-collection History
     await userRef.collection('topics').doc(topicId).set({
       topicName: topic,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -186,7 +235,6 @@ app.get('/notes', async (req, res) => {
     const { userId } = req.query;
     if (!userId) return res.status(400).json({ error: "User ID required" });
 
-    // 1. Get User's Latest Topic
     const userSnap = await admin.firestore().collection('users').doc(userId).get();
     const latestTopic = userSnap.data()?.latestTopic;
 
@@ -195,10 +243,8 @@ app.get('/notes', async (req, res) => {
     }
 
     const topicName = latestTopic.topicName;
-    // Cache Key: Hash of topic + 'notes' + modelVersion
     const cacheKey = computeHash(`${topicName}_notes_${MODEL_ID}`);
 
-    // 2. Check Cache
     const noteRef = admin.firestore().collection('notes').doc(cacheKey);
     const noteSnap = await noteRef.get();
 
@@ -206,7 +252,6 @@ app.get('/notes', async (req, res) => {
       return res.json({ fromCache: true, note: noteSnap.data() });
     }
 
-    // 3. Generate via Groq
     const systemPrompt = `You are an educational assistant for students aged 16-22. Produce concise, accurate study notes.`;
     const userPrompt = `Generate short study notes for the topic: "${topicName}".
     Constraints:
@@ -217,7 +262,6 @@ app.get('/notes', async (req, res) => {
 
     const generatedContent = await callGroqAI(systemPrompt, userPrompt, false);
 
-    // 4. Save to Firestore
     const noteData = {
       topicName,
       content: generatedContent,
@@ -254,7 +298,6 @@ app.get('/quiz', async (req, res) => {
     const topicName = latestTopic.topicName;
     const cacheKey = computeHash(`${topicName}_quiz_${difficulty}_${numQuestions}_${MODEL_ID}`);
 
-    // 2. Check Cache
     const quizRef = admin.firestore().collection('quizzes').doc(cacheKey);
     const quizSnap = await quizRef.get();
 
@@ -262,7 +305,6 @@ app.get('/quiz', async (req, res) => {
       return res.json({ fromCache: true, quiz: quizSnap.data() });
     }
 
-    // 3. Generate via Groq
     const systemPrompt = `You are a quiz generator. Return valid JSON only.`;
     const userPrompt = `Create a ${numQuestions}-question quiz for topic: "${topicName}".
     Constraints:
@@ -278,7 +320,6 @@ app.get('/quiz', async (req, res) => {
 
     const quizJson = await callGroqAI(systemPrompt, userPrompt, true);
 
-    // 4. Save to Firestore
     const quizData = {
       topicName,
       difficulty,
@@ -311,14 +352,13 @@ app.post('/quizAttempt', async (req, res) => {
     const attemptData = {
       quizId,
       score,
-      answers: answers || [], // [{ questionIndex: 0, selectedIndex: 1, correct: false }]
+      answers: answers || [], 
       timestamp: admin.firestore.FieldValue.serverTimestamp()
     };
 
     const docRef = await admin.firestore().collection('userProgress').doc(userId)
                   .collection('attempts').add(attemptData);
 
-    // Optional: Update XP if score is good (Simple Gamification)
     if (score > 60) {
         const userRef = admin.firestore().collection('users').doc(userId);
         await userRef.update({ xp: admin.firestore.FieldValue.increment(20) });
@@ -366,7 +406,6 @@ app.post('/markAttendance', async (req, res) => {
     const studentUid = decoded.uid;
     const { sessionId, studentLocation } = req.body;
 
-    // Dynamic QR Check
     const [realSessionId, timestamp] = sessionId.split('|');
     if (!realSessionId) return res.status(400).json({ error: 'Invalid QR Code' });
 
@@ -382,18 +421,16 @@ app.post('/markAttendance', async (req, res) => {
 
     const session = sessionSnap.data();
     
-    // Geo-Location Check
     if (!DEMO_MODE) {
         if (!session.location || !studentLocation) return res.status(400).json({ error: 'Location data missing' });
         const dist = getDistance(session.location.latitude, session.location.longitude, studentLocation.latitude, studentLocation.longitude);
         if (dist > ACCEPTABLE_RADIUS_METERS) return res.status(403).json({ error: `Too far! You are ${Math.round(dist)}m away.` });
     }
 
-    const userRef = admin.firestore().collection('users').doc(studentUid); // Reference to student
+    const userRef = admin.firestore().collection('users').doc(studentUid); 
     const userDoc = await userRef.get();
     const studentData = userDoc.data();
 
-    // 1. Create the "Receipt" (Log Entry)
     await admin.firestore().collection('attendance').doc(`${realSessionId}_${studentUid}`).set({
       sessionId: realSessionId,
       subject: session.subject || 'Class',
@@ -407,7 +444,6 @@ app.post('/markAttendance', async (req, res) => {
       status: 'Present'
     });
 
-    // 2. UPDATE THE SCOREBOARD (Increment Count)
     await userRef.update({
         attendanceCount: admin.firestore.FieldValue.increment(1)
     });
@@ -503,15 +539,13 @@ app.post('/generateRoadmap', async (req, res) => {
     } catch (error) { res.status(500).json({ error: "Failed" }); }
 });
 
-// 8. Submit Application ( HANDLES CLOUDINARY UPLOAD)
+// ✅ 8. SUBMIT APPLICATION (UPDATED WITH ENCRYPTION)
 app.post('/submitApplication', upload.single('document'), async (req, res) => {
   try {
     const { instituteName, contactName, email, phone, message } = req.body;
     const file = req.file; 
 
     let documentUrl = null;
-
-    // If a file exists, upload to Cloudinary
     if (file) {
         try {
             documentUrl = await uploadToCloudinary(file.buffer);
@@ -521,13 +555,16 @@ app.post('/submitApplication', upload.single('document'), async (req, res) => {
         }
     }
 
-    // Save to Firestore
+    // 🔥 ENCRYPT SENSITIVE DATA
+    const encryptedPhone = encrypt(phone);
+    const encryptedMessage = encrypt(message);
+
     await admin.firestore().collection('applications').add({
       instituteName,
       contactName,
       email,
-      phone: phone || '',
-      message: message || '',
+      phone: encryptedPhone,     // 🔒
+      message: encryptedMessage, // 🔒
       documentUrl: documentUrl, 
       status: 'pending',
       submittedAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -580,7 +617,6 @@ app.post('/requestLeave', upload.single('document'), async (req, res) => {
     const file = req.file;
     let documentUrl = null;
 
-    // Upload to Cloudinary if file exists
     if (file) {
         try {
             documentUrl = await uploadToCloudinary(file.buffer);
@@ -599,7 +635,7 @@ app.post('/requestLeave', upload.single('document'), async (req, res) => {
       fromDate, 
       toDate, 
       instituteId,
-      documentUrl, //  Save the Proof URL
+      documentUrl,
       status: 'pending', 
       createdAt: admin.firestore.FieldValue.serverTimestamp()
     });
@@ -708,17 +744,18 @@ app.post('/checkStatus', async (req, res) => {
         return res.json({ 
             found: true, 
             role: 'student',
-            status: data.status, // 'pending', 'approved', 'denied'
+            status: data.status, 
             message: `Student Request Status: ${data.status.toUpperCase()}`
         });
     }
 
-    // B. Check Institute Applications
+    // B. Check Institute Applications (WITH DECRYPTION IF NEEDED)
     const instituteSnap = await admin.firestore().collection('applications')
       .where('email', '==', email).limit(1).get();
 
     if (!instituteSnap.empty) {
         const data = instituteSnap.docs[0].data();
+        // If you were displaying phone, you'd decrypt(data.phone) here
         return res.json({ 
             found: true, 
             role: 'institute',
@@ -804,16 +841,15 @@ app.post('/updateResume', async (req, res) => {
 
         const decoded = await admin.auth().verifyIdToken(token);
         const uid = decoded.uid;
-        const { resumeData } = req.body; // Expects { skills: [], experience: '', projects: [] }
+        const { resumeData } = req.body; 
 
         if (!resumeData) return res.status(400).json({ error: "No data provided" });
 
         const userRef = admin.firestore().collection('users').doc(uid);
 
-        // Update User Doc with new Resume Data + Increment XP
         await userRef.update({
             resumeData: resumeData,
-            xp: admin.firestore.FieldValue.increment(50) // 🏆 Reward for productivity
+            xp: admin.firestore.FieldValue.increment(50) 
         });
 
         return res.json({ message: 'Resume updated! +50 XP awarded 🏆' });
@@ -860,7 +896,7 @@ app.post('/getAssignments', async (req, res) => {
         const snapshot = await q.get();
         const tasks = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
         
-        // Sort by Due Date locally (since mixed queries can be tricky in Firestore)
+        // Sort by Due Date locally 
         tasks.sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate));
         
         return res.json({ tasks });
@@ -891,7 +927,7 @@ app.post('/submitAssignment', upload.single('document'), async (req, res) => {
             studentName,
             rollNo,
             documentUrl,
-            status: 'Pending', // Pending, Graded
+            status: 'Pending', 
             marks: null,
             submittedAt: admin.firestore.FieldValue.serverTimestamp()
         });
@@ -931,13 +967,11 @@ app.post('/gradeSubmission', async (req, res) => {
 app.post('/generateDeepTask', async (req, res) => {
     try {
         const { userProfile } = req.body; 
-        // userProfile expects: { firstName, department, year, domain, subDomain, specificSkills }
         
         if (!userProfile) return res.status(400).json({ error: "Missing Profile Data" });
 
         const { domain, subDomain, specificSkills, year, department } = userProfile;
 
-        // 1. Construct the "Deep Context" Prompt
         const systemPrompt = `
             You are an expert Academic Mentor and Curriculum Architect for university students.
             Your goal is to create a single, highly practical, short-duration (15-30 min) micro-task that bridges the gap between a student's academic syllabus and their career interest.
@@ -974,7 +1008,6 @@ app.post('/generateDeepTask', async (req, res) => {
             }
         `;
 
-        // 2. Call Groq with JSON Enforcement
         const taskJson = await callGroqAI(systemPrompt, userPrompt, true);
 
         return res.json({ task: taskJson });
@@ -1063,7 +1096,6 @@ app.post('/startInteractiveTask', taskLimiter, async (req, res) => {
         let systemPrompt = "";
         let userPrompt = "";
 
-        // 🔥 MODE 1: SIMULATION (Roleplay - No Reading, Just Decisions)
         if (taskType === 'Simulation') {
             systemPrompt = "You are a Career Simulator. Create intense, realistic workplace scenarios. Output strictly valid JSON.";
             userPrompt = `Create a high-stakes scenario for a "${userInterest}" professional.
@@ -1085,7 +1117,6 @@ app.post('/startInteractiveTask', taskLimiter, async (req, res) => {
                 "consequence": "Explain briefly why B was the best move."
             }`;
         }
-        // 🕵️ MODE 2: MYSTERY (Logic Puzzle - Gamified)
         else if (taskType === 'Mystery') {
             systemPrompt = "You are a Logic Master. Create riddles and puzzles. Output strictly valid JSON.";
             userPrompt = `Create a logic puzzle or mystery related to "${userInterest}".
@@ -1101,13 +1132,11 @@ app.post('/startInteractiveTask', taskLimiter, async (req, res) => {
                 "consequence": "The solution was..."
             }`;
         } 
-        // 💻 MODE 3: CODING (Keep - it's practical)
         else if (taskType === 'Coding') {
             systemPrompt = "You are a Senior Tech Lead. Output strictly valid JSON.";
             userPrompt = `Give a junior developer a "${userInterest}" bug to fix or a function to write.
             JSON Format: { "title": "...", "scenario": "Your goal is to...", "starterCode": "...", "expectedOutput": "..." }`;
         }
-        // ⌨️ MODE 4: TYPING (Keep - it's easy XP)
         else if (taskType === 'Typing') {
             systemPrompt = "Output strictly valid JSON.";
             userPrompt = `Generate a fascinating fact about "${userInterest}" (max 30 words). JSON Format: { "textToType": "..." }`;
@@ -1130,10 +1159,9 @@ app.post('/submitInteractiveTask', async (req, res) => {
 
         let passed = false;
         let feedback = "";
-        let hint = null; // New "Smart Hint" feature
+        let hint = null; 
         let creditsEarned = 0;
 
-        // --- A. CODING CHALLENGE (Smart Tutor Mode) ---
         if (taskType === 'Coding') {
             const systemPrompt = `
                 You are a Code Reviewer. 
@@ -1157,12 +1185,8 @@ app.post('/submitInteractiveTask', async (req, res) => {
             }
         }
 
-        // --- B. TYPING TEST (Speed & Accuracy) ---
         else if (taskType === 'Typing') {
-            // Context.targetText is the original paragraph
             const { wpm, accuracy } = submission;
-            
-            // Hard Rules: >30 WPM and >90% Accuracy
             if (wpm >= 30 && accuracy >= 90) {
                 passed = true;
                 creditsEarned = 30;
@@ -1173,7 +1197,6 @@ app.post('/submitInteractiveTask', async (req, res) => {
             }
         }
 
-        // --- C. QUIZ (Instant Check) ---
         else if (taskType === 'Quiz') {
             if (submission.answerIndex === context.answerIndex) {
                 passed = true;
@@ -1185,12 +1208,11 @@ app.post('/submitInteractiveTask', async (req, res) => {
             }
         }
 
-        // 3. Final Database Update (If Passed)
         if (passed) {
             await userRef.update({ xp: admin.firestore.FieldValue.increment(creditsEarned) });
             return res.json({ success: true, passed: true, credits: creditsEarned, feedback });
         } else {
-            return res.json({ success: true, passed: false, feedback, hint }); // Return hint if failed
+            return res.json({ success: true, passed: false, feedback, hint }); 
         }
 
     } catch (err) {
@@ -1337,7 +1359,6 @@ app.post('/verify2FA', async (req, res) => {
 
     if (verified) {
       if (!isLogin) {
-        // Activate 2FA permanently
         await admin.firestore().collection('secrets').doc(uid).update({
           secret: secretKey,
           tempSecret: admin.firestore.FieldValue.delete()
