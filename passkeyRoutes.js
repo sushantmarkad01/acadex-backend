@@ -1,171 +1,211 @@
 // backend/passkeyRoutes.js
 const express = require('express');
 const router = express.Router();
-const admin = require('firebase-admin'); // Uses your existing Firebase Admin
-const { 
-  generateRegistrationOptions, 
-  verifyRegistrationResponse, 
-  generateAuthenticationOptions, 
-  verifyAuthenticationResponse 
+const admin = require('firebase-admin');
+const {
+  generateRegistrationOptions,
+  verifyRegistrationResponse,
+  generateAuthenticationOptions,
+  verifyAuthenticationResponse
 } = require('@simplewebauthn/server');
 
 const db = admin.firestore();
 
-// CONSTANTS (Update these for production!)
-const RP_ID = 'acadex-app.onrender.com'; // Your Render backend domain (without https://)
-// For local testing use: 'localhost' 
-const ORIGIN = 'https://acadex-app.onrender.com'; // Your Frontend URL
-// For local testing use: 'http://localhost:3000'
+// ---------------------------
+// 🔥 IMPORTANT CONFIG
+// ---------------------------
 
-// Temp memory to store challenges (In production, use Redis or DB)
-const challengeStore = {}; 
+// Your DEPLOYED FRONTEND domain
+const ORIGIN = 'https://scheduplan-1b51d.web.app';
 
-// --- 1. REGISTRATION (SETUP) ---
+// RP ID MUST match frontend domain (NO https://)
+const RP_ID = 'scheduplan-1b51d.web.app';
 
+// Temporary challenge store (use Redis for production)
+const challengeStore = {};
+
+
+// ------------------------------------------------
+// 1️⃣ PASSKEY REGISTRATION (START)
+// ------------------------------------------------
 router.get('/register-start', async (req, res) => {
-    const { userId } = req.query;
-    
-    // Get user from Firestore to check if they already have authenticators
-    const userDoc = await db.collection('users').doc(userId).get();
-    const user = userDoc.data();
+  const { userId } = req.query;
 
-    // 1. Generate Registration Options
-    const options = await generateRegistrationOptions({
-        rpName: 'AcadeX',
-        rpID: RP_ID,
-        userID: userId,
-        userName: user.email || 'User',
-        // Prevent registering the same finger twice
-        excludeCredentials: (user.authenticators || []).map(auth => ({
-           id: Buffer.from(auth.credentialID, 'base64url')
+  const userDoc = await db.collection('users').doc(userId).get();
+  const user = userDoc.data();
 
-            type: 'public-key',
-        })),
-        authenticatorSelection: {
-            residentKey: 'preferred',
-            userVerification: 'preferred',
-            authenticatorAttachment: 'platform', // Forces TouchID/FaceID
-        },
-    });
+  const options = await generateRegistrationOptions({
+    rpName: 'AcadeX',
+    rpID: RP_ID,
+    userID: userId,
+    userName: user.email || 'User',
 
-    // 2. Save challenge temporarily
-    challengeStore[userId] = options.challenge;
+    // Pass previously registered credential IDs to prevent duplicates
+    excludeCredentials: (user?.authenticators || []).map(auth => ({
+      id: Buffer.from(auth.credentialID, 'base64url'),
+      type: 'public-key',
+    })),
 
-    res.json(options);
+    authenticatorSelection: {
+      residentKey: 'preferred',
+      userVerification: 'preferred',
+      authenticatorAttachment: 'platform',
+    },
+  });
+
+  challengeStore[userId] = options.challenge;
+
+  // Auto-expire challenge after 2 minutes for safety
+  setTimeout(() => {
+    delete challengeStore[userId];
+  }, 1000 * 120);
+
+  res.json(options);
 });
 
+
+// ------------------------------------------------
+// 2️⃣ PASSKEY REGISTRATION (FINISH)
+// ------------------------------------------------
 router.post('/register-finish', async (req, res) => {
-    const { userId, data } = req.body;
-    const expectedChallenge = challengeStore[userId];
+  const { userId, data } = req.body;
+  const expectedChallenge = challengeStore[userId];
 
-    if (!expectedChallenge) return res.status(400).json({ error: 'Challenge expired' });
+  if (!expectedChallenge)
+    return res.status(400).json({ error: 'Challenge expired' });
 
-    try {
-        const verification = await verifyRegistrationResponse({
-            response: data,
-            expectedChallenge,
-            expectedOrigin: ORIGIN,
-            expectedRPID: RP_ID,
-        });
-
-        if (verification.verified) {
-            const { registrationInfo } = verification;
-
-            // Prepare key for Firestore (Convert Buffer to Base64)
-            const newAuthenticator = {
-               credentialID: registrationInfo.credentialID.toString('base64url')
-
-                credentialPublicKey: registrationInfo.credentialPublicKey.toString('base64'),
-                counter: registrationInfo.counter,
-                transports: registrationInfo.transports || []
-            };
-
-            // Save to "users" collection
-            await db.collection('users').doc(userId).update({
-                authenticators: admin.firestore.FieldValue.arrayUnion(newAuthenticator)
-            });
-
-            delete challengeStore[userId]; // Cleanup
-            res.json({ verified: true });
-        } else {
-            res.status(400).json({ verified: false });
-        }
-    } catch (error) {
-        console.error(error);
-        res.status(400).json({ error: error.message });
-    }
-});
-
-// --- 2. AUTHENTICATION (LOGIN) ---
-
-router.get('/login-start', async (req, res) => {
-    const { userId } = req.query;
-    const userDoc = await db.collection('users').doc(userId).get();
-    
-    if (!userDoc.exists) return res.status(404).json({ error: 'User not found' });
-    const user = userDoc.data();
-
-    if (!user.authenticators || user.authenticators.length === 0) {
-        return res.status(400).json({ error: 'No passkeys registered' });
-    }
-
-    const options = await generateAuthenticationOptions({
-        rpID: RP_ID,
-        allowCredentials: user.authenticators.map(auth => ({
-            id: auth.credentialID,
-            type: 'public-key',
-        })),
-        userVerification: 'preferred',
+  try {
+    const verification = await verifyRegistrationResponse({
+      response: data,
+      expectedChallenge,
+      expectedOrigin: ORIGIN,
+      expectedRPID: RP_ID,
     });
 
-    challengeStore[userId] = options.challenge;
-    res.json(options);
-});
+    if (!verification.verified) {
+      return res.status(400).json({ verified: false });
+    }
 
-router.post('/login-finish', async (req, res) => {
-    const { userId, data } = req.body;
-    const userDoc = await db.collection('users').doc(userId).get();
-    const user = userDoc.data();
-    
-    const expectedChallenge = challengeStore[userId];
-    
-    // Find the authenticator used
-    const authenticatorBase64 = user.authenticators.find(auth => auth.credentialID === data.id);
-    if (!authenticatorBase64) return res.status(400).send('Authenticator not found');
+    const { registrationInfo } = verification;
 
-    // Convert Base64 back to Buffer for library
-    const authenticator = {
-        ...authenticatorBase64,
-        credentialPublicKey: Buffer.from(authenticatorBase64.credentialPublicKey, 'base64')
+    const newAuthenticator = {
+      credentialID: registrationInfo.credentialID.toString('base64url'),
+      credentialPublicKey: registrationInfo.credentialPublicKey.toString('base64'),
+      counter: registrationInfo.counter,
+      transports: registrationInfo.transports || [],
     };
 
-    try {
-        const verification = await verifyAuthenticationResponse({
-            response: data,
-            expectedChallenge,
-            expectedOrigin: ORIGIN,
-            expectedRPID: RP_ID,
-            authenticator,
-        });
+    await db.collection('users').doc(userId).update({
+      authenticators: admin.firestore.FieldValue.arrayUnion(newAuthenticator)
+    });
 
-        if (verification.verified) {
-            // Update counter to prevent replay attacks
-            const updatedAuths = user.authenticators.map(auth => {
-                if (auth.credentialID === data.id) {
-                    return { ...auth, counter: verification.authenticationInfo.newCounter };
-                }
-                return auth;
-            });
-            await db.collection('users').doc(userId).update({ authenticators: updatedAuths });
+    delete challengeStore[userId];
 
-            delete challengeStore[userId];
-            res.json({ verified: true });
-        } else {
-            res.status(400).json({ verified: false });
-        }
-    } catch (error) {
-        res.status(400).json({ error: error.message });
-    }
+    res.json({ verified: true });
+
+  } catch (error) {
+    console.error(error);
+    res.status(400).json({ error: error.message });
+  }
 });
+
+
+// ------------------------------------------------
+// 3️⃣ PASSKEY LOGIN (START)
+// ------------------------------------------------
+router.get('/login-start', async (req, res) => {
+  const { userId } = req.query;
+
+  const userDoc = await db.collection('users').doc(userId).get();
+  if (!userDoc.exists)
+    return res.status(404).json({ error: 'User not found' });
+
+  const user = userDoc.data();
+
+  if (!user.authenticators || user.authenticators.length === 0) {
+    return res.status(400).json({ error: 'No passkeys registered' });
+  }
+
+  const options = await generateAuthenticationOptions({
+    rpID: RP_ID,
+    allowCredentials: user.authenticators.map(auth => ({
+      id: Buffer.from(auth.credentialID, 'base64url'),
+      type: 'public-key',
+    })),
+    userVerification: 'preferred',
+  });
+
+  challengeStore[userId] = options.challenge;
+
+  // Auto delete challenge
+  setTimeout(() => {
+    delete challengeStore[userId];
+  }, 1000 * 120);
+
+  res.json(options);
+});
+
+
+// ------------------------------------------------
+// 4️⃣ PASSKEY LOGIN (FINISH)
+// ------------------------------------------------
+router.post('/login-finish', async (req, res) => {
+  const { userId, data } = req.body;
+
+  const userDoc = await db.collection('users').doc(userId).get();
+  const user = userDoc.data();
+
+  const expectedChallenge = challengeStore[userId];
+  if (!expectedChallenge)
+    return res.status(400).json({ error: 'Challenge expired' });
+
+  // Find matching authenticator
+  const authenticatorEntry = user.authenticators.find(auth =>
+    auth.credentialID === data.id
+  );
+
+  if (!authenticatorEntry)
+    return res.status(400).json({ error: 'Authenticator not found' });
+
+  const authenticator = {
+    ...authenticatorEntry,
+    credentialPublicKey: Buffer.from(authenticatorEntry.credentialPublicKey, 'base64'),
+  };
+
+  try {
+    const verification = await verifyAuthenticationResponse({
+      response: data,
+      expectedChallenge,
+      expectedOrigin: ORIGIN,
+      expectedRPID: RP_ID,
+      authenticator,
+    });
+
+    if (!verification.verified) {
+      return res.status(400).json({ verified: false });
+    }
+
+    // Update replay counter
+    const updatedAuths = user.authenticators.map(auth => {
+      if (auth.credentialID === data.id) {
+        return { ...auth, counter: verification.authenticationInfo.newCounter };
+      }
+      return auth;
+    });
+
+    await db.collection('users').doc(userId).update({
+      authenticators: updatedAuths,
+    });
+
+    delete challengeStore[userId];
+
+    res.json({ verified: true });
+
+  } catch (error) {
+    console.error(error);
+    res.status(400).json({ error: error.message });
+  }
+});
+
 
 module.exports = router;
