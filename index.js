@@ -7,13 +7,12 @@ const rateLimit = require('express-rate-limit'); //  3. Import Rate Limiter
 const speakeasy = require('speakeasy');
 const QRCode = require('qrcode');
 const { callGroqAI, computeHash, isUnsafe, MODEL_ID } = require('./lib/groqClient'); 
-const passkeyRoutes = require('./passkeyRoutes');
+
 require('dotenv').config(); 
 
 const app = express();
 app.use(cors({ origin: true }));
 app.use(express.json());
-app.use('/auth/passkeys', passkeyRoutes); // <--- ADD THIS
 
 const taskLimiter = rateLimit({ 
     windowMs: 15 * 60 * 1000, // 15 mins
@@ -70,11 +69,13 @@ function initFirebaseAdmin() {
 }
 initFirebaseAdmin();
 
+const passkeyRoutes = require('./passkeyRoutes');
+app.use('/auth/passkeys', passkeyRoutes);
+
 // --- UTILITIES & HELPERS ---
 
 const DEMO_MODE = (process.env.DEMO_MODE || 'true') === 'true';
 const ACCEPTABLE_RADIUS_METERS = Number(process.env.ACCEPTABLE_RADIUS_METERS || 200);
-
 function getDistance(lat1, lon1, lat2, lon2) {
   const toRad = (x) => (x * Math.PI) / 180;
   const R = 6371000; 
