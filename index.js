@@ -1348,5 +1348,64 @@ app.post('/verify2FA', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// Route 1: Create User
+app.post('/createUser', async (req, res) => {
+    try {
+        const { email, password, firstName, lastName, role, instituteId, instituteName, ... } = req.body;
+        
+        // --- 🔑 ENCRYPT HERE ---
+        const encryptedInstituteId = encryptData(instituteId); // <-- The encryption step
+        
+        if (!encryptedInstituteId) {
+             return res.status(500).json({ error: 'Failed to encrypt data.' });
+        }
+
+        const userRecord = await admin.auth().createUser({ email, password, displayName: `${firstName} ${lastName}` });
+        
+        const userDoc = { 
+            // ...
+            // Store the encrypted string in the database
+            instituteId: encryptedInstituteId, 
+            instituteName,
+            // ...
+        };
+        
+        await admin.firestore().collection('users').doc(userRecord.uid).set(userDoc);
+        
+        // NOTE: If you need to search or use the ID in Firebase Auth claims (which is common), 
+        // you should consider hashing the ID and storing the hash alongside the encrypted ID. 
+        // For simplicity here, we stick to the provided code logic.
+        await admin.auth().setCustomUserClaims(userRecord.uid, { role, instituteId }); 
+        
+        return res.json({ message: 'User created successfully', uid: userRecord.uid });
+    } catch (err) { return res.status(500).json({ error: err.message }); }
+});
+
+// Example: A hypothetical route to get a user's *real* ID for an internal process
+app.get('/admin/getUserInstitute/:uid', async (req, res) => {
+    try {
+        const { uid } = req.params;
+        const userSnap = await admin.firestore().collection('users').doc(uid).get();
+
+        if (!userSnap.exists) return res.status(404).json({ error: "User not found" });
+
+        const encryptedId = userSnap.data().instituteId;
+        
+        // --- 🔑 DECRYPT HERE ---
+        const realInstituteId = decryptData(encryptedId); // <-- The decryption step
+        
+        if (!realInstituteId) {
+            return res.status(500).json({ error: 'Decryption failed. Data may be corrupt.' });
+        }
+
+        return res.json({ 
+            uid,
+            realInstituteId: realInstituteId,
+            message: "Success! Real ID retrieved (backend only)."
+        });
+        
+    } catch (err) { return res.status(500).json({ error: err.message }); }
+});
+
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => console.log(`Backend running on port ${PORT}`));
