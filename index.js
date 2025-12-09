@@ -754,20 +754,22 @@ app.post('/generateQuiz', async (req, res) => {
         const apiKey = process.env.GROQ_API_KEY;
 
         const systemPrompt = `
-            You are a professor creating a quick-fire quiz.
-            Generate 10 Multiple Choice Questions (MCQs) for a ${department} student in Semester ${semester}.
-            Focus on topics relevant to: "${careerGoal}".
+            You are a strict academic professor.
+            Generate a challenging 15-question quiz for a ${department} student (Sem ${semester}) aspiring to be a "${careerGoal}".
+            
+            Also, provide a short "Career Roadmap" paragraph at the end explaining how this quiz relates to their goal.
             
             Return STRICT JSON format:
             {
               "questions": [
                 {
-                  "question": "Question text here?",
-                  "options": ["Option A", "Option B", "Option C", "Option D"],
+                  "question": "...",
+                  "options": ["A", "B", "C", "D"],
                   "answer": "Option A",
-                  "explanation": "Short explanation of why A is correct."
+                  "explanation": "..."
                 }
-              ]
+              ],
+              "careerAdvice": "To become a ${careerGoal}, focus on..."
             }
         `;
 
@@ -785,15 +787,14 @@ app.post('/generateQuiz', async (req, res) => {
         });
 
         const data = await response.json();
-        const cleanJson = data.choices[0].message.content.replace(/```json|```/g, '').trim();
-        res.json(JSON.parse(cleanJson));
+        const content = data.choices[0].message.content;
+        res.json(JSON.parse(content));
 
     } catch (error) {
         console.error("Quiz Gen Error:", error);
         res.status(500).json({ error: "Failed to generate quiz." });
     }
 });
-
 
 // Route 20: Update Resume & Claim XP
 app.post('/updateResume', async (req, res) => {
@@ -1349,6 +1350,67 @@ app.post('/verify2FA', async (req, res) => {
       res.status(400).json({ error: "Invalid Code" });
     }
   } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/verifyCode', async (req, res) => {
+    try {
+        const { code, language, problemStatement } = req.body;
+        const apiKey = process.env.GROQ_API_KEY;
+
+        const prompt = `
+            Act as a Code Compiler & Mentor.
+            Problem: "${problemStatement}"
+            Language: ${language}
+            Student Code: 
+            ${code}
+
+            Check if the code solves the problem correctly.
+            Return STRICT JSON:
+            {
+                "correct": boolean,
+                "output": "Simulated output of the code",
+                "hint": "If wrong, give a small hint. If right, say 'Great job!'"
+            }
+        `;
+
+        const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+            method: "POST",
+            headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
+            body: JSON.stringify({ messages: [{ role: "user", content: prompt }], model: "llama-3.3-70b-versatile", response_format: { type: "json_object" } })
+        });
+
+        const data = await response.json();
+        res.json(JSON.parse(data.choices[0].message.content));
+    } catch (err) { res.status(500).json({ error: "Compiler Error" }); }
+});
+
+// --- UPDATE 3: TEACHER ANALYTICS (Task Stats) ---
+app.post('/getTaskAnalytics', async (req, res) => {
+    try {
+        const { instituteId } = req.body;
+        // Fetch aggregated stats from 'userProgress' collection or calculate from 'users'
+        // This is a simplified aggregation
+        const usersSnap = await admin.firestore().collection('users').where('instituteId', '==', instituteId).get();
+        
+        let stats = { quiz: 0, coding: 0, typing: 0, totalXP: 0 };
+        
+        usersSnap.forEach(doc => {
+            const d = doc.data();
+            stats.totalXP += (d.xp || 0);
+            // Assuming you track specific counts in user doc, or we query subcollections
+            // For now, let's simulate based on XP distribution or mock
+        });
+
+        // Mocking distribution for chart visualization (Replace with real subcollection queries if needed)
+        const chartData = [
+            { name: 'Quizzes', value: Math.floor(stats.totalXP * 0.4) },
+            { name: 'Coding', value: Math.floor(stats.totalXP * 0.3) },
+            { name: 'Typing', value: Math.floor(stats.totalXP * 0.2) },
+            { name: 'Reading', value: Math.floor(stats.totalXP * 0.1) }
+        ];
+
+        res.json({ chartData });
+    } catch (err) { res.status(500).json({ error: "Stats failed" }); }
 });
 
 const PORT = process.env.PORT || 8080;
